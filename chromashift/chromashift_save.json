@@ -1,0 +1,37 @@
+{
+  "chromatic_points": -5,
+  "upgrade_tree": {
+    "max_hp": {
+      "name": "Chromatic Vitality",
+      "desc": "+10 Max HP per level",
+      "max_lvl": 3,
+      "costs": [
+        100,
+        250,
+        500
+      ],
+      "current_lvl": 3
+    },
+    "dash_cd": {
+      "name": "Phase Shift",
+      "desc": "-10% Dash Cooldown",
+      "max_lvl": 3,
+      "costs": [
+        150,
+        300,
+        600
+      ],
+      "current_lvl": 3
+    },
+    "refract_win": {
+      "name": "Temporal Lens",
+      "desc": "+0.03s Refraction Window",
+      "max_lvl": 2,
+      "costs": [
+        200,
+        400
+      ],
+      "current_lvl": 2
+    }
+  }
+}
