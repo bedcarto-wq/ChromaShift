@@ -310,4 +310,4 @@ def generate_all(folder: str, overwrite: bool = False) -> int:
 if __name__ == '__main__':
     target = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'sounds')
-    print(f"Создано файлов: {generate_all(target, overwrite=True)} -> {target}")
+    print(f"Generated sound files: {generate_all(target, overwrite=True)} -> {target}")  # ASCII: консоль Windows (cp1252)
