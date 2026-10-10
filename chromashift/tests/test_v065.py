@@ -70,7 +70,7 @@ def bot_step(g, frames, god=False, switch=True):
 
 class TestConfigAndMods(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(GAME_VERSION, '0.6.5')
+        self.assertEqual(GAME_VERSION, '0.7.0')
         with open(os.path.join(GAME_DIR, '..', 'VERSION'), encoding='utf-8') as f:
             self.assertEqual(f.read().strip(), GAME_VERSION)
 
@@ -144,8 +144,9 @@ class TestUpgradeTree(unittest.TestCase):
         self.p.buy_upgrade('core_hp')
         self.p.buy_upgrade('core_hp')
         self.p.buy_upgrade('blue_power')
+        paid = 10000 - self.p.cp  # 0.7.0: цены нелинейные — возвращаем ровно уплаченное
         refund = self.p.reset_upgrades()
-        self.assertEqual(refund, 20 + 35 + 25)
+        self.assertEqual(refund, paid)
         self.assertEqual(self.p.cp, 10000)
         self.assertEqual(self.p.data['upgrades'], {})
 
@@ -158,6 +159,8 @@ class TestUpgradeTree(unittest.TestCase):
         for nid, node in pr.UPGRADES.items():
             m = pr.RunMods()
             node['effect'](m, node['max'])
+            if node.get('grow'):  # растущий узел действует через статистику профиля
+                continue
             self.assertNotEqual(m.to_dict(), pr.RunMods().to_dict(), nid)
 
 

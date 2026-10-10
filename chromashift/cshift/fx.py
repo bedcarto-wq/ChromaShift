@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Tuple
 import pygame
 
 from .config import CFG
+from .hires import get_scale, layer
 from .utils import (SurfaceCache, clamp, color_lerp, get_font, mode_color,
                     vec_normalize, visual)
 
@@ -269,7 +270,7 @@ class ParryIndicator:
             warn_r = CFG.PARRY_WARNING_RADIUS
             alpha = int(80 * pulse * (self.warning_timer / self.warning_max))
             if alpha > 5:
-                warn_surf = pygame.Surface((int(warn_r * 2 + 4), int(warn_r * 2 + 4)), pygame.SRCALPHA)
+                warn_surf = layer((int(warn_r * 2 + 4), int(warn_r * 2 + 4)), pygame.SRCALPHA)
                 center = int(warn_r + 2)
                 pygame.draw.circle(warn_surf, (*CFG.COLOR_ACCENT, alpha), (center, center), int(warn_r), 2)
                 surface.blit(warn_surf, (int(px - center), int(py - center)))
@@ -279,7 +280,7 @@ class ParryIndicator:
             t = self.timer / self.max_timer
             r = CFG.PLAYER_RADIUS + (CFG.PARRY_INDICATOR_RADIUS - CFG.PLAYER_RADIUS) * t
             alpha = int(255 * t)
-            ring_surf = pygame.Surface((int(r * 2 + 4), int(r * 2 + 4)), pygame.SRCALPHA)
+            ring_surf = layer((int(r * 2 + 4), int(r * 2 + 4)), pygame.SRCALPHA)
             center = int(r + 2)
             pygame.draw.circle(ring_surf, (*CFG.COLOR_ACCENT, alpha), (center, center), int(r), 3)
             surface.blit(ring_surf, (int(px - center), int(py - center)))
@@ -421,7 +422,7 @@ class PrismaticCrystal:
             t = 1 - (self.wave_radius / 80)
             alpha = int(200 * t)
             if alpha > 0:
-                wave_surf = pygame.Surface((200, 200), pygame.SRCALPHA)
+                wave_surf = layer((200, 200), pygame.SRCALPHA)
                 pygame.draw.circle(wave_surf, (*color, alpha),
                                    (100, 100), int(self.wave_radius), 3)
                 surface.blit(wave_surf, (int(player_x - 100), int(player_y - 100)))

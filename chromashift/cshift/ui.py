@@ -10,6 +10,7 @@ from .progression import (ACHIEVEMENTS, ARCHETYPES, ARTIFACTS, BRANCHES, COSMETI
                           MODULES, PROFILE_SLOTS, RISKS, TENSION_LEVELS, UPGRADES, Profile, active_synergies,
                           branch_spent, challenge_setup, loadout_energy, node_status, preview_node)
 from .settings import ACTION_NAMES, CHOICE_NAMES, radial_sectors
+from .hires import get_scale, layer
 from .utils import clamp, color_lerp, get_font, mode_color, visual
 
 FONT = 'arial'
@@ -63,12 +64,12 @@ _PANEL_CACHE: Dict[Tuple[int, int, int], pygame.Surface] = {}
 def panel(surf: pygame.Surface, rect: Tuple[int, int, int, int], alpha: int = 200,
           border: Optional[Tuple[int, int, int]] = None) -> None:
     x, y, w, h = [int(v) for v in rect]
-    key = (w, h, alpha)
+    key = (w, h, alpha, get_scale())
     s = _PANEL_CACHE.get(key)
     if s is None:
         if len(_PANEL_CACHE) > 64:
             _PANEL_CACHE.clear()
-        s = pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
+        s = layer((max(1, w), max(1, h)), pygame.SRCALPHA)
         s.fill((14, 18, 30, alpha))
         _PANEL_CACHE[key] = s
     surf.blit(s, (x, y))
@@ -124,9 +125,9 @@ def draw_background(game: Any, surf: pygame.Surface, menu: bool = False) -> None
 
 
 def _dark_overlay(game: Any) -> pygame.Surface:
-    if game._dark_surf is None:
+    if game._dark_surf is None or getattr(game._dark_surf, 's', 1.0) != get_scale():
         r = 280
-        s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+        s = layer((r * 2, r * 2), pygame.SRCALPHA)
         s.fill((0, 0, 0, 235))
         for i in range(r, 0, -4):
             a = int(235 * (i / r) ** 2)
@@ -176,7 +177,7 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
     if game.director.special == 'darkness' and game.director.state == 'active':
         dark = _dark_overlay(game)
         r = dark.get_width() // 2
-        cover = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+        cover = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
         cover.fill((0, 0, 0, 235))
         cover.fill((0, 0, 0, 0), (int(p.x - r), int(p.y - r), r * 2, r * 2))
         surf.blit(cover, (0, 0))
@@ -207,7 +208,7 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
             pygame.draw.circle(surf, mode_color(m), (int(cx), int(cy)), 26 if sel else 20, 0 if sel else 3)
             text(surf, m, 14, CFG.COLOR_TEXT, (cx, cy + 28), 'center', True)
     if game.flash_alpha > 0:
-        fs = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+        fs = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
         fs.fill((*game.flash_color, int(255 * clamp(game.flash_alpha, 0, 1))))
         surf.blit(fs, (0, 0))
 
@@ -497,7 +498,7 @@ class ListScreen(Screen):
     def draw(self, surf: pygame.Surface) -> None:
         W = CFG.SCREEN_WIDTH
         if self.show_world:
-            veil = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+            veil = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
             veil.fill((5, 6, 12, 170))
             surf.blit(veil, (0, 0))
         text(surf, self.title, 40, CFG.COLOR_ACCENT, (80, 40), bold=True)
@@ -838,7 +839,7 @@ class UpgradeTreeScreen(Screen):
                 status, _ = node_status(p, nid)
                 lvl = p.data['upgrades'].get(nid, 0)
                 fill = {'maxed': (30, 60, 45), 'available': (35, 45, 75), 'expensive': (40, 40, 55),
-                        'locked': (22, 24, 32), 'blocked': (45, 25, 30)}[status]
+                        'locked': (22, 24, 32), 'blocked': (45, 25, 30)}.get(status, (18, 18, 24))
                 pygame.draw.rect(surf, fill, r)
                 border = col if status in ('available', 'maxed') else (70, 75, 95)
                 if nid == cur:
@@ -1461,7 +1462,7 @@ class ArtifactScreen(Screen):
 
     def draw(self, surf: pygame.Surface) -> None:
         W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
-        veil = pygame.Surface((W, H), pygame.SRCALPHA)
+        veil = layer((W, H), pygame.SRCALPHA)
         veil.fill((5, 6, 12, 180))
         surf.blit(veil, (0, 0))
         text(surf, 'Выберите артефакт', 36, CFG.COLOR_ACCENT, (W / 2, 120), 'center', True)

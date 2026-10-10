@@ -7,15 +7,16 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import pygame
 
 from .config import CFG
+from .hires import HiFont, HiSurface, layer  # noqa: F401  (layer реэкспортируется для модулей)
 
 # === ПАЛИТРЫ (доступность) ===
 # Цвета режимов для разных типов цветового зрения + высокая контрастность.
 PALETTES: Dict[str, Dict[str, Tuple[int, int, int]]] = {
-    'default': {'RED': (255, 50, 80), 'BLUE': (60, 140, 255), 'GREEN': (80, 255, 140)},
-    'deuteranopia': {'RED': (230, 120, 0), 'BLUE': (40, 120, 255), 'GREEN': (240, 230, 80)},
-    'protanopia': {'RED': (200, 160, 0), 'BLUE': (30, 110, 255), 'GREEN': (120, 230, 255)},
-    'tritanopia': {'RED': (255, 40, 90), 'BLUE': (0, 170, 170), 'GREEN': (255, 170, 200)},
-    'high_contrast': {'RED': (255, 0, 0), 'BLUE': (0, 120, 255), 'GREEN': (0, 255, 0)},
+    'default': {'RED': (255, 50, 80), 'BLUE': (60, 140, 255), 'GREEN': (80, 255, 140), 'VIOLET': (190, 90, 255)},
+    'deuteranopia': {'RED': (230, 120, 0), 'BLUE': (40, 120, 255), 'GREEN': (240, 230, 80), 'VIOLET': (230, 230, 230)},
+    'protanopia': {'RED': (200, 160, 0), 'BLUE': (30, 110, 255), 'GREEN': (120, 230, 255), 'VIOLET': (235, 235, 235)},
+    'tritanopia': {'RED': (255, 40, 90), 'BLUE': (0, 170, 170), 'GREEN': (255, 170, 200), 'VIOLET': (240, 240, 240)},
+    'high_contrast': {'RED': (255, 0, 0), 'BLUE': (0, 120, 255), 'GREEN': (0, 255, 0), 'VIOLET': (255, 0, 255)},
 }
 PALETTE_NAMES = {
     'default': 'Стандартная', 'deuteranopia': 'Дейтеранопия', 'protanopia': 'Протанопия',
@@ -131,8 +132,8 @@ class SurfaceCache:
         surf = cls._lookup(key)
         if surf is None:
             size = radius * 4
-            surf = pygame.Surface((size, size), pygame.SRCALPHA)
-            pygame.draw.circle(surf, (*color, alpha), (size // 2, size // 2), radius)
+            surf = HiSurface((size, size), pygame.SRCALPHA)
+            pygame.draw.circle(surf, (*color, alpha), (size / 2, size / 2), radius)
             cls._store(key, surf)
         return surf
     
@@ -144,7 +145,7 @@ class SurfaceCache:
         surf = cls._lookup(key)
         if surf is None:
             size = radius * 2 + 2
-            surf = pygame.Surface((size, size), pygame.SRCALPHA)
+            surf = HiSurface((size, size), pygame.SRCALPHA)
             pygame.draw.circle(surf, (*color, alpha), (radius + 1, radius + 1), radius)
             cls._store(key, surf)
         return surf
@@ -155,18 +156,23 @@ class SurfaceCache:
 
 
 # === FONT CACHE ===
-_FONT_CACHE: Dict[Tuple[str, int, bool], pygame.font.Font] = {}
+_FONT_CACHE: Dict[Tuple[str, int, bool], HiFont] = {}
 
 
-def get_font(name: str, size: int, bold: bool = False, scaled: bool = False) -> pygame.font.Font:
+def get_font(name: str, size: int, bold: bool = False, scaled: bool = False) -> HiFont:
     """SysFont ищет шрифт в системе — дорого вызывать на каждый FloatingText."""
     size = max(8, int(size * _visual['ui_scale'])) if scaled else size
     key = (name, size, bold)
     font = _FONT_CACHE.get(key)
     if font is None:
-        font = pygame.font.SysFont(name, size, bold=bold)
+        font = HiFont(name, size, bold)
         _FONT_CACHE[key] = font
     return font
+
+def clear_render_caches() -> None:
+    """После смены масштаба рендера кэши поверхностей пересоздаются в новом разрешении."""
+    SurfaceCache.clear()
+
 
 # === SPATIAL HASH (ОПТИМИЗАЦИЯ КОЛЛИЗИЙ) ===
 class SpatialHash:
