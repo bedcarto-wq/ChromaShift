@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.tmp
+*.corrupt-*
+# 0.6.5: пользовательские данные и артефакты сборки
+chromashift/saves/
+chromashift/assets/sounds/*.wav
+chromashift/chromashift.log
+chromashift/build/
+chromashift/dist/
+*.spec
+*.bak[0-9]
