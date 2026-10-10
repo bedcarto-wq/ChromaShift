@@ -1,10 +1,10 @@
-"""Интерфейс ChromaShift 0.6.5: HUD, отрисовка мира и все экраны меню."""
+"""Интерфейс ChromaShift 0.7.0: HUD, отрисовка мира и все экраны меню."""
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pygame
 
-from .config import CFG, GAME_VERSION, MODES
+from .config import ALL_MODES, CFG, GAME_VERSION, MODES
 from .entities import MODE_SHAPES, ENEMY_NAMES, ELITE_MODS, BossEnemy, draw_shape
 from .progression import (ACHIEVEMENTS, ARCHETYPES, ARTIFACTS, BRANCHES, COSMETICS, DIFFICULTIES, HULLS,
                           MODULES, PROFILE_SLOTS, RISKS, TENSION_LEVELS, UPGRADES, Profile, active_synergies,
@@ -124,6 +124,11 @@ def draw_background(game: Any, surf: pygame.Surface, menu: bool = False) -> None
         pygame.draw.line(surf, grid, (0, y), (CFG.SCREEN_WIDTH, y), 1)
 
 
+def clear_ui_caches() -> None:
+    """Вызывается при смене масштаба рендера."""
+    _PANEL_CACHE.clear()
+
+
 def _dark_overlay(game: Any) -> pygame.Surface:
     if game._dark_surf is None or getattr(game._dark_surf, 's', 1.0) != get_scale():
         r = 280
@@ -139,8 +144,21 @@ def _dark_overlay(game: Any) -> pygame.Surface:
 def draw_world(game: Any, surf: pygame.Surface) -> None:
     draw_background(game, surf)
     t = game.game_time
+    for z in getattr(game, 'paints', ()):
+        z.draw(surf)
     for r in game.resonances:
         r.draw(surf)
+    for pt in getattr(game, 'portals', ()):
+        pt.draw(surf, t)
+    cm = getattr(game, 'color_mech', None)
+    if cm is not None:
+        for w in cm.wells:
+            k = 0.5 + 0.5 * math.sin(t * 5)
+            pygame.draw.circle(surf, color_lerp(CFG.COLOR_BG, mode_color('BLUE'), 0.3 + 0.3 * k),
+                               (int(w.x), int(w.y)), int(w.radius), 1)
+            pygame.draw.circle(surf, mode_color('BLUE'), (int(w.x), int(w.y)), int(10 + 6 * k), 2)
+    for mn in getattr(game, 'mines', ()):
+        mn.draw(surf, t)
     for pl in game.pillars:
         pl.draw(surf)
     for h in game.hazards:
@@ -168,13 +186,23 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
     for e in game.enemies:
         e.draw(surf)
         e.draw_overlay(surf, t)
+        if e.stun_t > 0:
+            pygame.draw.circle(surf, CFG.COLOR_ACCENT, (int(e.x), int(e.y)), int(e.radius + 5), 1)
+        if e.is_leader:
+            draw_shape(surf, 'triangle', CFG.COLOR_ACCENT, e.x, e.y - e.radius - 9, 5, -math.pi / 2, 0)
+    for wl in getattr(game, 'walls', ()):
+        wl.draw(surf)
+    for bm in getattr(game, 'beams', ()):
+        bm.draw(surf)
     p = game.player
     if game.dying_timer < 0 and game.in_run:
         p.draw(surf, t)
         game.parry_indicator.draw(surf, p.x, p.y)
         game.crystal.draw(surf, p.x, p.y, p.mode, game.combo, t)
     game.particles.draw(surf)
-    if game.director.special == 'darkness' and game.director.state == 'active':
+    dark_on = ((game.director.special == 'darkness' and game.director.state == 'active')
+               or (getattr(game.mods, 'always_dark', False) and game.in_run and not game.is_training))
+    if dark_on:
         dark = _dark_overlay(game)
         r = dark.get_width() // 2
         cover = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -186,7 +214,7 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
     for e in game.enemies:
         if not e.alive:
             continue
-        hidden = game.director.special == 'darkness' and math.hypot(e.x - p.x, e.y - p.y) > 260
+        hidden = dark_on and math.hypot(e.x - p.x, e.y - p.y) > 260
         off = e.x < 0 or e.y < 0 or e.x > CFG.SCREEN_WIDTH or e.y > CFG.SCREEN_HEIGHT
         if hidden or off:
             ang = math.atan2(e.y - p.y, e.x - p.x)
@@ -240,7 +268,7 @@ class HUD:
         y += 14
         # Режимы
         keys = g.settings.get('keys', {})
-        for i, mode in enumerate(MODES):
+        for i, mode in enumerate(g.available_modes() if hasattr(g, 'available_modes') else MODES):
             x = m + i * 46
             sel = p.mode == mode
             col = mode_color(mode)
@@ -250,6 +278,31 @@ class HUD:
                 pygame.draw.circle(surf, col, (x + 16, y + 16), 13 if sel else 9, 0 if sel else 2)
             text(surf, keys.get(f'mode_{mode.lower()}', str(i + 1)).upper(), 11, (170, 180, 200), (x + 16, y + 32), 'center')
         y += 50
+        cm = getattr(g, 'color_mech', None)
+        if cm is not None and not g.settings.get('hud_compact', False):
+            # Перегрузка, навык цвета (R), способность (F), осколки
+            if cm.overload_t > 0:
+                bar(surf, (m, y, 120, 6), cm.overload_t / (5.0 + g.mods.overload_duration_add), CFG.COLOR_ACCENT)
+                text(surf, 'ПЕРЕГРУЗКА', 12, CFG.COLOR_ACCENT, (m + 126, y - 4), bold=True)
+            else:
+                bar(surf, (m, y, 120, 6), cm.overload / CFG.OVERLOAD_MAX, (200, 170, 255))
+                text(surf, 'Перегрузка', 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            from .mechanics import ABILITIES, COLOR_SKILLS
+            skill_max = CFG.COLOR_SKILL_COOLDOWN * g.mods.skill_cd_mult
+            bar(surf, (m, y, 120, 6), 1 - clamp(cm.skill_cd / max(0.01, skill_max), 0, 1), mode_color(p.mode))
+            text(surf, f"{keys.get('skill', 'r').upper()}: {COLOR_SKILLS[p.mode][0]}", 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            ab = ABILITIES.get(cm.ability, ABILITIES['nova'])
+            bar(surf, (m, y, 120, 6), 1 - clamp(cm.ability_cd / max(0.01, ab['cd'] * g.mods.ability_cd_mult), 0, 1),
+                CFG.COLOR_PRIMARY)
+            text(surf, f"{keys.get('ability', 'f').upper()}: {ab['name']}", 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            text(surf, f"Осколки: {cm.shards}", 12, (200, 190, 255), (m, y))
+            y += 18
+        if p.color_lock_t > 0 and p.color_lock_t < 9000:
+            text(surf, f"ЦВЕТ ЗАБЛОКИРОВАН {p.color_lock_t:.1f} c", 14, (170, 170, 190), (m, y), bold=True)
+            y += 18
         if p.impulse_active:
             text(surf, f"ИМПУЛЬС {p.impulse_timer:.1f} c", 16, mode_color(p.mode), (m, y), bold=True)
             y += 20
@@ -281,6 +334,21 @@ class HUD:
                 tags.append(f"Напряжение {g.tension}")
             if d.overheat:
                 tags.append('ПЕРЕГРЕВ')
+            if d.gamble:
+                tags.append('СТАВКА')
+            elif d.gamble_next:
+                tags.append('Ставка на следующую волну')
+            if d.tempo:
+                tags.append('ТЕМП')
+            if getattr(g, 'daily_rule', 'none') != 'none':
+                from .progression import DAILY_RULES
+                tags.append(DAILY_RULES[g.daily_rule][0])
+            if g.run_type == 'blitz':
+                tags.append(f"Осталось {int(g.blitz_left // 60)}:{int(g.blitz_left % 60):02d}")
+            if d.special == 'survive' and d.state == 'active':
+                tags.append(f"Продержитесь ещё {max(0.0, d.survive_left):.0f} c")
+            if d.state == 'intermission' and d.wave > 0:
+                tags.append(f"{keys.get('gamble', 'b').upper()} — ставка")
             if tags:
                 text(surf, ' · '.join(tags), 12, (180, 170, 140), (W / 2, m + 28), 'center')
             # Призрак рекорда
@@ -289,13 +357,18 @@ class HUD:
                 gw = sum(1 for tt in ghost if tt <= g.game_time) + 1
                 text(surf, f"Призрак рекорда: волна {gw}", 12, (150, 160, 190), (W - m, m + 54), 'right')
         # Босс
-        boss = next((e for e in g.enemies if isinstance(e, BossEnemy) and e.alive), None)
+        boss = next((e for e in g.enemies if e.alive and (isinstance(e, BossEnemy) or getattr(e, 'boss_like', False))),
+                    None)
         if boss is not None:
             bw = 520
             bx = W / 2 - bw / 2
-            bar(surf, (bx, 52, bw, 12), boss.hp / boss.max_hp, mode_color(boss.vulnerable_mode))
-            text(surf, f"{boss.name} · фаза {boss.phase} · уязвим к {boss.vulnerable_mode}", 14, CFG.COLOR_TEXT,
-                 (W / 2, 66), 'center', True)
+            vm = boss.vulnerable_mode
+            bar(surf, (bx, 52, bw, 12), max(0.0, boss.hp) / boss.max_hp, mode_color(vm) if vm else CFG.COLOR_DANGER)
+            title = getattr(boss, 'title', None) or boss.name
+            ph = getattr(boss, 'phase', 1)
+            weak = f" · уязвим к {vm}" if vm else (' · сначала головы' if getattr(boss, 'heads', None)
+                                                  and any(h.alive for h in boss.heads) else '')
+            text(surf, f"{title} · фаза {ph}{weak}", 14, CFG.COLOR_TEXT, (W / 2, 66), 'center', True)
         # Такт
         since = g.game_time - g.beat_tracker.last_beat_time
         pulse = clamp(1 - since / CFG.BEAT_INTERVAL, 0, 1)

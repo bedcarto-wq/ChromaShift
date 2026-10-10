@@ -159,7 +159,8 @@ class WaveDirector:
         return getattr(self.game, 'run_type', 'standard')
 
     def horde(self) -> bool:
-        return 'horde' in (getattr(self.game, 'risks', None) or [])
+        return ('horde' in (getattr(self.game, 'risks', None) or [])
+                or getattr(self.game, 'daily_rule', 'none') == 'rush_day')
 
     def elite_chance(self, n: int) -> float:
         if n < CFG.ELITE_START_WAVE:

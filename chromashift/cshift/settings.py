@@ -15,13 +15,15 @@ logger = logging.getLogger('ChromaShift')
 
 DEFAULT_KEYS = {
     'up': 'w', 'down': 's', 'left': 'a', 'right': 'd',
-    'mode_red': '1', 'mode_blue': '2', 'mode_green': '3',
+    'mode_red': '1', 'mode_blue': '2', 'mode_green': '3', 'mode_violet': '4',
+    'skill': 'r', 'ability': 'f', 'gamble': 'b', 'restart': 'f5',
     'cycle_next': 'e', 'cycle_prev': 'q', 'radial': 'left shift',
     'dash': 'space', 'fire': 'j', 'pause': 'escape',
 }
 ACTION_NAMES = {
     'up': 'Вверх', 'down': 'Вниз', 'left': 'Влево', 'right': 'Вправо',
-    'mode_red': 'Режим RED', 'mode_blue': 'Режим BLUE', 'mode_green': 'Режим GREEN',
+    'mode_red': 'Режим RED', 'mode_blue': 'Режим BLUE', 'mode_green': 'Режим GREEN', 'mode_violet': 'Режим VIOLET',
+    'skill': 'Навык цвета', 'ability': 'Способность', 'gamble': 'Ставка на волну', 'restart': 'Быстрый рестарт',
     'cycle_next': 'Следующий цвет', 'cycle_prev': 'Предыдущий цвет', 'radial': 'Радиальное меню (удерж.)',
     'dash': 'Рывок', 'fire': 'Огонь (клавиша)', 'pause': 'Пауза',
 }
@@ -62,6 +64,18 @@ DEFAULTS: Dict[str, Any] = {
     'gamepad_deadzone': 0.25,
     'aim_assist': 0.3,
     'last_profile': 0,
+    # 0.7.0
+    'render_quality': 'native',     # native / balanced / classic
+    'fps_cap': 60,
+    'vsync': False,
+    'damage_numbers': True,
+    'post_fx': True,
+    'minimap': False,
+    'hud_compact': False,
+    'slowmo': True,
+    'ability': 'nova',
+    'check_updates': False,
+    'lang': 'ru',
 }
 
 CHOICES = {
@@ -72,6 +86,10 @@ CHOICES = {
     'physics_preset': ['standard', 'arcade', 'heavy', 'custom'],
     'sound_pack': ['studio', 'retro'],
     'bg_theme': ['grid', 'stars', 'waves', 'minimal'],
+    'render_quality': ['native', 'balanced', 'classic'],
+    'fps_cap': [30, 60, 120, 144, 240, 0],
+    'ability': ['nova', 'timeslow', 'prism_wall', 'shift'],
+    'lang': ['ru', 'en'],
 }
 CHOICE_NAMES = {
     'hold': 'Удержание', 'toggle': 'Переключение', 'auto': 'Автоогонь', 'aim': 'По прицелу', 'move': 'По движению',
@@ -80,10 +98,14 @@ CHOICE_NAMES = {
     'tritanopia': 'Тританопия', 'high_contrast': 'Высокий контраст',
     'standard': 'Стандарт', 'arcade': 'Аркада', 'heavy': 'Тяжёлая',
     'studio': 'Студийный (WAV)', 'retro': 'Ретро (синтез)',
+    'native': 'Чёткая (родное разрешение)', 'balanced': 'Сбалансированная', 'classic': 'Классическая (720p)',
+    30: '30', 60: '60', 120: '120', 144: '144', 240: '240', 0: 'Без ограничения',
+    'nova': 'Нова', 'timeslow': 'Стоп-кадр', 'prism_wall': 'Призменная стена', 'shift': 'Сдвиг',
+    'ru': 'Русский', 'en': 'English (частично)',
     'grid': 'Сетка', 'stars': 'Звёзды', 'waves': 'Волны', 'minimal': 'Минимализм',
 }
 RANGES = {
-    'shake': (0.0, 1.0, 0.25), 'flash': (0.0, 1.0, 0.25), 'glow': (0.3, 1.5, 0.1), 'ui_scale': (0.8, 1.4, 0.1),
+    'shake': (0.0, 1.0, 0.25), 'flash': (0.0, 1.0, 0.25), 'glow': (0.3, 1.5, 0.1), 'ui_scale': (0.8, 1.6, 0.1),
     'volume': (0.0, 1.0, 0.1), 'gamepad_deadzone': (0.1, 0.5, 0.05), 'aim_assist': (0.0, 1.0, 0.1),
 }
 
@@ -232,7 +254,8 @@ class InputManager:
                 return ['bound']
             if in_game:
                 k = event.key
-                for action in ('mode_red', 'mode_blue', 'mode_green', 'cycle_next', 'cycle_prev', 'dash', 'pause'):
+                for action in ('mode_red', 'mode_blue', 'mode_green', 'mode_violet', 'cycle_next', 'cycle_prev',
+                               'dash', 'pause', 'skill', 'ability', 'gamble', 'restart'):
                     if k == self._key(action):
                         acts.append(action)
                 if k == self._key('fire') and self.settings.get('fire_mode') == 'toggle':

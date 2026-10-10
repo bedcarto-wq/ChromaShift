@@ -387,7 +387,11 @@ class TestWaves(unittest.TestCase):
         d = self.g.director
         d.wave = 4
         d.begin_wave()
-        self.assertTrue(d.is_breather)
+        # 0.7.0: на 5-й волне — мини-босс, выбор из двух бонусов после победы над ним
+        self.assertTrue(d.is_miniboss)
+        self.assertTrue(any(t['kind'] == 'warden' for grp in d.subwaves for t in grp))
+        self.g.powerups = []
+        d.finish_wave()
         groups = [p.group for p in self.g.powerups]
         self.assertEqual(len(groups), 2)
         self.assertEqual(groups[0], groups[1])
@@ -595,7 +599,7 @@ class TestFullRuns(unittest.TestCase):
                 g.step(1 / 60, [])
             g.draw()
             if sp == 'mono':
-                self.assertTrue(all(e.vulnerable_mode == d.mono_mode for e in g.enemies if e.kind != 'dissonance'))
+                self.assertTrue(all(e.vulnerable_mode == d.mono_mode for e in g.enemies if e.kind not in ('dissonance', 'swarm')))
         CFG.set_override('SPECIAL_WAVE_CHANCE', 0.15)
 
     def test_stress_performance(self):

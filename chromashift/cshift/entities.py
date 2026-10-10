@@ -276,6 +276,7 @@ class Player:
         game.particles.emit_burst(self.x, self.y, 15, mode_color('BLUE'), 200.0, 0.5, 3.0)
         dmg_mult = self.mods.damage_mult * self.mods.mode_damage_mult['BLUE']
         pull = getattr(self.mods, 'blue_gravity', False)
+        hits = 0
         for enemy in game.spatial_hash.query(self.x, self.y, radius + 50):
             if not getattr(enemy, 'alive', False) or not isinstance(enemy, Enemy):
                 continue
@@ -286,6 +287,10 @@ class Player:
                     enemy.vx += nx * 160
                     enemy.vy += ny * 160
                 enemy.take_damage(base * dmg_mult, game, 'BLUE', is_aoe=True)
+                hits += 1
+        cm = getattr(game, 'color_mech', None)
+        if cm is not None and hits >= 3:
+            cm.trial_event('blue_multi')
 
     # --- Урон ---
     def can_be_damaged(self, game: Any) -> bool:
@@ -296,6 +301,8 @@ class Player:
         if not self.can_be_damaged(game):
             return False
         damage = max(1, int(round(damage * game.enemy_damage_mult)))
+        if getattr(self.mods, 'glass_mode', False):
+            damage = max(damage, 25)  # риск «Стекло»
         if self.shield_charges > 0:
             self.shield_charges -= 1
             self.invuln_timer = 0.6
