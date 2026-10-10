@@ -6,6 +6,9 @@ import random
 import json
 import os
 import logging
+import time
+from array import array
+from collections import OrderedDict
 from typing import List, Tuple, Optional, Dict, Any, Set
 
 try:
@@ -18,12 +21,24 @@ except ImportError:
 logging.basicConfig(level=logging.WARNING, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger('ChromaShift')
 
+# Папка игры: конфиг и сохранения хранятся рядом с исходником,
+# а не в текущей рабочей директории терминала/IDE.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_game_path(path: str) -> str:
+    """Относительные пути считаются от папки игры."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(BASE_DIR, path)
+
+
 # === GAME CONFIG (SINGLETON + HOT-RELOAD) ===
 class GameConfig:
     """Singleton-конфигурация с hot-reload из config.json."""
     _instance: Optional['GameConfig'] = None
     _file_mtime: float = 0.0
-    _config_path: str = "chromashift_config.json"
+    _config_path: str = resolve_game_path("chromashift_config.json")
     
     def __new__(cls) -> 'GameConfig':
         if cls._instance is None:
@@ -240,32 +255,80 @@ def color_add(c: Tuple[int, int, int], v: int) -> Tuple[int, int, int]:
 
 # === SURFACE CACHE ===
 class SurfaceCache:
-    """Кэширование Surface для предотвращения аллокаций в draw()."""
-    _cache: Dict[Tuple, pygame.Surface] = {}
+    """Кэширование Surface для предотвращения аллокаций в draw().
+
+    Альфа квантуется, а размер кэша ограничен (LRU): иначе пульсирующие
+    эффекты (резонанс, свечение) порождают тысячи уникальных ключей и
+    неограниченный рост памяти.
+    """
+    _cache: 'OrderedDict[Tuple, pygame.Surface]' = OrderedDict()
+    MAX_ENTRIES = 512
+    ALPHA_STEP = 8
+
+    @classmethod
+    def _quantize_alpha(cls, alpha: int) -> int:
+        alpha = int(clamp(alpha, 0, 255))
+        if alpha >= 255:
+            return 255
+        return (alpha // cls.ALPHA_STEP) * cls.ALPHA_STEP
+
+    @classmethod
+    def _lookup(cls, key: Tuple) -> Optional[pygame.Surface]:
+        surf = cls._cache.get(key)
+        if surf is not None:
+            cls._cache.move_to_end(key)
+        return surf
+
+    @classmethod
+    def _store(cls, key: Tuple, surf: pygame.Surface) -> pygame.Surface:
+        cls._cache[key] = surf
+        if len(cls._cache) > cls.MAX_ENTRIES:
+            cls._cache.popitem(last=False)
+        return surf
     
     @classmethod
     def get_glow(cls, radius: int, color: Tuple[int, int, int], alpha: int = 255) -> pygame.Surface:
-        key = ('glow', radius, color, alpha)
-        if key not in cls._cache:
+        radius = max(1, int(radius))
+        alpha = cls._quantize_alpha(alpha)
+        key = ('glow', radius, tuple(color), alpha)
+        surf = cls._lookup(key)
+        if surf is None:
             size = radius * 4
             surf = pygame.Surface((size, size), pygame.SRCALPHA)
             pygame.draw.circle(surf, (*color, alpha), (size // 2, size // 2), radius)
-            cls._cache[key] = surf
-        return cls._cache[key]
+            cls._store(key, surf)
+        return surf
     
     @classmethod
     def get_circle(cls, radius: int, color: Tuple[int, int, int], alpha: int = 255) -> pygame.Surface:
-        key = ('circle', radius, color, alpha)
-        if key not in cls._cache:
+        radius = max(1, int(radius))
+        alpha = cls._quantize_alpha(alpha)
+        key = ('circle', radius, tuple(color), alpha)
+        surf = cls._lookup(key)
+        if surf is None:
             size = radius * 2 + 2
             surf = pygame.Surface((size, size), pygame.SRCALPHA)
             pygame.draw.circle(surf, (*color, alpha), (radius + 1, radius + 1), radius)
-            cls._cache[key] = surf
-        return cls._cache[key]
+            cls._store(key, surf)
+        return surf
     
     @classmethod
     def clear(cls) -> None:
         cls._cache.clear()
+
+
+# === FONT CACHE ===
+_FONT_CACHE: Dict[Tuple[str, int, bool], pygame.font.Font] = {}
+
+
+def get_font(name: str, size: int, bold: bool = False) -> pygame.font.Font:
+    """SysFont ищет шрифт в системе — дорого вызывать на каждый FloatingText."""
+    key = (name, size, bold)
+    font = _FONT_CACHE.get(key)
+    if font is None:
+        font = pygame.font.SysFont(name, size, bold=bold)
+        _FONT_CACHE[key] = font
+    return font
 
 # === SPATIAL HASH (ОПТИМИЗАЦИЯ КОЛЛИЗИЙ) ===
 class SpatialHash:
@@ -324,13 +387,24 @@ class SoundManager:
         self.sounds: Dict[str, Any] = {}
         self._failed_sounds: Set[str] = set()
         
+        self.channels = 2
         try:
             pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            init_info = pygame.mixer.get_init()
+            if init_info:
+                self.channels = init_info[2]
             self.enabled = True
             self._generate_sounds()
         except Exception as e:
             logger.warning(f"Sound init failed: {e}")
             self.enabled = False
+
+    def _make_sound(self, wave_16: Any) -> Any:
+        """Собирает Sound под фактическое число каналов микшера."""
+        if self.channels == 1:
+            return pygame.sndarray.make_sound(wave_16.copy())
+        frames = np.repeat(wave_16[:, None], self.channels, axis=1)
+        return pygame.sndarray.make_sound(np.ascontiguousarray(frames))
     
     def _generate_sounds(self) -> None:
         if not self.enabled:
@@ -397,11 +471,11 @@ class SoundManager:
                 
                 wave = wave * envelope * volume
                 wave_16 = np.int16(wave * 32767)
-                stereo = np.column_stack((wave_16, wave_16))
-                
-                return pygame.sndarray.make_sound(stereo.copy())
+                return self._make_sound(wave_16)
             else:
-                samples = []
+                # Fallback без NumPy: 16-битные знаковые сэмплы.
+                # bytes() не принимает отрицательные значения, поэтому array('h').
+                samples = array('h')
                 attack_samples = int(n_samples * 0.04)
                 release_start = int(n_samples * 0.75)
                 
@@ -420,9 +494,9 @@ class SoundManager:
                     
                     value *= env * volume
                     val_int = int(value * 16384)
-                    samples.extend([val_int, val_int])
+                    samples.extend([val_int] * self.channels)
                 
-                return pygame.mixer.Sound(buffer=bytes(samples))
+                return pygame.mixer.Sound(buffer=samples.tobytes())
         except Exception as e:
             logger.warning(f"Sound synth failed: {e}")
             return None
@@ -451,8 +525,7 @@ class SoundManager:
                     wave[start:end] = note * env * volume
                 
                 wave_16 = np.int16(wave * 32767)
-                stereo = np.column_stack((wave_16, wave_16))
-                return pygame.sndarray.make_sound(stereo.copy())
+                return self._make_sound(wave_16)
         except Exception as e:
             logger.warning(f"Arpeggio synth failed: {e}")
         return None
@@ -669,7 +742,7 @@ class FloatingText:
         self.max_lifetime = lifetime
         self.vy = -70.0
         self.font_size = font_size
-        self.font = pygame.font.SysFont("consolas", font_size, bold=True)
+        self.font = get_font("consolas", font_size, bold=True)
     
     def update(self, dt: float) -> bool:
         self.y += self.vy * dt
@@ -690,12 +763,12 @@ class FloatingText:
 class ParryIndicator:
     """Визуальный индикатор окна для Perfect Refraction с warning zone."""
     
-    def __init__(self):
+    def __init__(self, window: Optional[float] = None):
         self.active = False
         self.warning_active = False
         self.timer = 0.0
         self.warning_timer = 0.0
-        self.max_timer = CFG.PERFECT_REFRACTION_WINDOW
+        self.max_timer = window if window is not None else CFG.PERFECT_REFRACTION_WINDOW
         self.warning_max = 0.5
         self.pulse_phase = 0.0
     
@@ -745,21 +818,44 @@ class ParryIndicator:
 
 # === BEAT SYNC TRACKER ===
 class BeatSyncTracker:
-    """Отслеживает убийства в такт музыкальному басу."""
+    """Отслеживает убийства в такт музыкальному басу.
+
+    Ритмические часы идут всегда (и без звука): раньше доли отмечала
+    только музыка, которая не запускалась, поэтому last_beat_time
+    оставался 0 и почти каждое убийство засчитывалось как BEAT.
+    """
     
     def __init__(self):
         self.beat_window = CFG.BEAT_WINDOW
         self.last_beat_time = 0.0
         self.beat_kill_count = 0
+        self._beat_accum = 0.0
+
+    def update(self, dt: float, game_time: float) -> bool:
+        """Продвигает ритмические часы. Возвращает True на новой доле."""
+        interval = CFG.BEAT_INTERVAL
+        if interval <= 0:
+            return False
+        self._beat_accum += dt
+        on_beat = False
+        while self._beat_accum >= interval:
+            # Вычитаем интервал, а не обнуляем, — без накопления дрейфа.
+            self._beat_accum -= interval
+            on_beat = True
+        if on_beat:
+            self.on_beat(game_time - self._beat_accum)
+        return on_beat
     
     def on_beat(self, game_time: float) -> None:
         self.last_beat_time = game_time
+
+    def is_on_beat(self, game_time: float) -> bool:
+        time_since = game_time - self.last_beat_time
+        beat_interval = CFG.BEAT_INTERVAL
+        return time_since < self.beat_window or time_since > (beat_interval - self.beat_window)
     
     def on_kill(self, game: Any) -> None:
-        time_since = game.game_time - self.last_beat_time
-        beat_interval = CFG.BEAT_INTERVAL
-        
-        if time_since < self.beat_window or time_since > (beat_interval - self.beat_window):
+        if self.is_on_beat(game.game_time):
             self.beat_kill_count += 1
             game.score += 150
             game.particles.emit_burst(game.player.x, game.player.y, 10, CFG.COLOR_ACCENT, 200.0, 0.5)
@@ -843,52 +939,75 @@ class MetaProgression:
         }
     
     def load(self) -> None:
-        save_file = CFG.META_SAVE_FILE
+        save_file = resolve_game_path(CFG.META_SAVE_FILE)
+        if not os.path.exists(save_file):
+            return
         try:
-            if os.path.exists(save_file):
-                with open(save_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.chromatic_points = data.get('chromatic_points', 0)
-                    
-                    # Миграция: если нет upgrade_tree или он старый
-                    saved_tree = data.get('upgrade_tree', data.get('upgrades', None))
-                    if saved_tree is None:
-                        # Старый формат — сброс
-                        self.upgrade_tree = self._default_tree()
-                    else:
-                        # Миграция: проверяем каждый ключ
-                        default = self._default_tree()
-                        for key in default:
-                            if key in saved_tree:
-                                saved = saved_tree[key]
-                                # Поддержка старого формата (просто число)
-                                if isinstance(saved, (int, float)):
-                                    default[key]['current_lvl'] = min(
-                                        int(saved), default[key]['max_lvl']
-                                    )
-                                elif isinstance(saved, dict) and 'current_lvl' in saved:
-                                    default[key]['current_lvl'] = min(
-                                        int(saved['current_lvl']), default[key]['max_lvl']
-                                    )
-                        self.upgrade_tree = default
-        except Exception as e:
+            with open(save_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("save root is not an object")
+        except (OSError, ValueError) as e:
+            # Повреждённое сохранение не перезаписываем молча: делаем копию,
+            # иначе следующий save() уничтожит данные игрока.
             logger.warning(f"Meta load error: {e}")
+            self._backup_corrupt(save_file)
+            self.chromatic_points = 0
             self.upgrade_tree = self._default_tree()
+            return
+        
+        self.chromatic_points = self._to_int(data.get('chromatic_points', 0), 0, minimum=0)
+        
+        # Миграция: upgrade_tree (новый формат) или upgrades (старый)
+        saved_tree = data.get('upgrade_tree', data.get('upgrades', None))
+        default = self._default_tree()
+        if isinstance(saved_tree, dict):
+            for key, upg in default.items():
+                saved = saved_tree.get(key)
+                # Поддержка старого формата (просто число)
+                if isinstance(saved, dict):
+                    saved = saved.get('current_lvl', 0)
+                lvl = self._to_int(saved, 0, minimum=0)
+                upg['current_lvl'] = min(lvl, upg['max_lvl'])
+        self.upgrade_tree = default
+    
+    @staticmethod
+    def _to_int(value: Any, default: int, minimum: int = 0) -> int:
+        if isinstance(value, bool):
+            return default
+        try:
+            return max(minimum, int(value))
+        except (TypeError, ValueError):
+            return default
+    
+    @staticmethod
+    def _backup_corrupt(save_file: str) -> None:
+        backup = f"{save_file}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            os.replace(save_file, backup)
+            logger.warning(f"Corrupt save moved to {backup}")
+        except OSError as e:
+            logger.warning(f"Could not back up corrupt save: {e}")
     
     def save(self) -> None:
-        save_file = CFG.META_SAVE_FILE
+        save_file = resolve_game_path(CFG.META_SAVE_FILE)
+        tmp_file = save_file + ".tmp"
         try:
             data = {
                 'chromatic_points': self.chromatic_points,
                 'upgrade_tree': self.upgrade_tree,
             }
-            with open(save_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
+            # Атомарная запись: при сбое старый файл остаётся целым.
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_file, save_file)
+        except OSError as e:
             logger.warning(f"Meta save error: {e}")
     
     def add_points(self, score: int) -> None:
-        points = score // 1000 * CFG.META_POINTS_PER_1000_SCORE
+        points = int(score) // 1000 * CFG.META_POINTS_PER_1000_SCORE
+        if points <= 0:
+            return
         self.chromatic_points += points
         self.save()
     
@@ -1224,9 +1343,6 @@ class Player:
         if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
             dx += 1.0
         
-        if keys[pygame.K_SPACE]:
-            self.start_dash(game)
-        
         if dx != 0 or dy != 0:
             dx, dy = vec_normalize(dx, dy)
         
@@ -1363,8 +1479,11 @@ class Player:
                 else:
                     enemy.take_damage(int(CFG.BULLET_DAMAGE * 0.5), game, 'BLUE', is_aoe=True)
     
+    def can_be_damaged(self, game: Any) -> bool:
+        return not (self.invuln_timer > 0 or self.dash_invuln or game.god_mode)
+    
     def take_damage(self, damage: int, game: Any, source_x: float, source_y: float) -> None:
-        if self.invuln_timer > 0 or self.dash_invuln or game.god_mode:
+        if not self.can_be_damaged(game):
             return
         
         self.hp -= damage
@@ -2002,18 +2121,23 @@ class PowerUp:
 
 # === CHROMATIC BUFFER ===
 class ChromaticBuffer:
-    def __init__(self):
+    def __init__(self, window: Optional[float] = None):
         self.last_change_time: float = -10.0
         self.last_mode: str = 'RED'
+        # Окно Perfect Refraction с учётом улучшения Temporal Lens
+        self.window = window if window is not None else CFG.PERFECT_REFRACTION_WINDOW
     
     def record_change(self, time: float, mode: str) -> None:
         self.last_change_time = time
         self.last_mode = mode
     
     def is_in_window(self, current_time: float) -> bool:
-        return (current_time - self.last_change_time) <= CFG.PERFECT_REFRACTION_WINDOW
+        return (current_time - self.last_change_time) <= self.window
 
 # === MUSIC SYSTEM ===
+CONDUCTOR_RESTORE_EVENT = pygame.USEREVENT + 1
+
+
 class MusicSystem:
     def __init__(self, sound_manager: SoundManager):
         self.enabled = sound_manager.enabled
@@ -2024,8 +2148,6 @@ class MusicSystem:
         self.note_sequence = ['melody_c', 'melody_e', 'melody_g']
         self.current_note_index = 0
         
-        self.bass_timer = 0.0
-        self.bass_interval = CFG.BEAT_INTERVAL
         self.percussion_timer = 0.0
         self.percussion_interval = 0.25
     
@@ -2036,6 +2158,7 @@ class MusicSystem:
     
     def stop(self) -> None:
         self.active = False
+        pygame.time.set_timer(CONDUCTOR_RESTORE_EVENT, 0)
     
     def on_kill(self, mode: str) -> None:
         if not self.active or not self.enabled:
@@ -2049,27 +2172,30 @@ class MusicSystem:
         
         self.current_note_index = (self.current_note_index + 1) % len(self.note_sequence)
     
-    def update(self, dt: float, game_time: float, beat_tracker: BeatSyncTracker) -> None:
+    def on_beat(self) -> None:
+        """Бас звучит на долях общих ритмических часов BeatSyncTracker."""
+        if self.active and self.enabled:
+            self.sound_manager.play('bass_note', 0.3)
+    
+    def update(self, dt: float) -> None:
         if not self.active or not self.enabled:
             return
         
-        self.bass_timer += dt
-        if self.bass_timer >= self.bass_interval:
-            self.bass_timer = 0.0
-            self.sound_manager.play('bass_note', 0.3)
-            beat_tracker.on_beat(game_time)
-        
         self.percussion_timer += dt
-        if self.percussion_timer >= self.percussion_interval:
-            self.percussion_timer = 0.0
+        while self.percussion_timer >= self.percussion_interval:
+            self.percussion_timer -= self.percussion_interval
             self.sound_manager.play('percussion_hit', 0.2)
     
     def conductor_damage(self) -> None:
+        if not self.enabled:
+            return
         self.active = False
-        pygame.time.set_timer(pygame.USEREVENT + 1, 2000)
+        # Одноразовый таймер: раньше он повторялся каждые 2 с бесконечно.
+        pygame.time.set_timer(CONDUCTOR_RESTORE_EVENT, 2000, 1)
     
     def conductor_restore(self) -> None:
-        self.active = True
+        if self.enabled:
+            self.active = True
 
 # === HUD ===
 class HUD:
@@ -2255,7 +2381,7 @@ class Menu:
             (f"СЧЁТ: {int(score)}", CFG.COLOR_ACCENT),
             (f"МАКС. КОМБО: {max_combo}", CFG.COLOR_ACCENT),
             (f"ВОЛНА: {wave}", CFG.COLOR_ACCENT),
-            (f"CHROMA POINTS: +{score // 1000}", CFG.COLOR_ACCENT),
+            (f"CHROMA POINTS: +{int(score) // 1000 * CFG.META_POINTS_PER_1000_SCORE}", CFG.COLOR_ACCENT),
         ]
         y = 300
         for text, color in stats:
@@ -2505,6 +2631,7 @@ class Game:
         
         self.resonances: List[ChromaticResonance] = []
         self.kill_streak: Dict[str, int] = {'RED': 0, 'BLUE': 0, 'GREEN': 0}
+        self.impulse_streak: Dict[str, int] = {'RED': 0, 'BLUE': 0, 'GREEN': 0}
         
         self.echo_chamber_active = False
         self.echo_chamber_timer = 0.0
@@ -2513,6 +2640,9 @@ class Game:
         self._config_check_timer = 0.0
     
     def reset_game(self) -> None:
+        # Отменяем отложенное восстановление музыки из прошлого забега
+        pygame.time.set_timer(CONDUCTOR_RESTORE_EVENT, 0)
+        
         self.player = Player(CFG.SCREEN_WIDTH / 2, CFG.SCREEN_HEIGHT / 2, self.meta)
         self.enemies: List[Enemy] = []
         self.player_bullets: List[PlayerBullet] = []
@@ -2524,11 +2654,12 @@ class Game:
         self.particles.clear()
         
         self.screen_shake = ScreenShake()
-        self.chromatic_buffer = ChromaticBuffer()
+        refraction_window = CFG.PERFECT_REFRACTION_WINDOW + self.meta.get_refraction_window_bonus()
+        self.chromatic_buffer = ChromaticBuffer(refraction_window)
         self.beat_tracker = BeatSyncTracker()
         self.crystal = PrismaticCrystal()
         self.music_system = MusicSystem(self.sound_manager)
-        self.parry_indicator = ParryIndicator()
+        self.parry_indicator = ParryIndicator(refraction_window)
         self.spatial_hash = SpatialHash()
         self.juice_system = JuiceSystem()
         
@@ -2542,7 +2673,9 @@ class Game:
         self.hitstop_timer = 0.0
         self.game_time = 0.0
         self.flash_alpha = 0.0
+        self.flash_color = CFG.COLOR_PRIMARY
         self.kill_streak = {'RED': 0, 'BLUE': 0, 'GREEN': 0}
+        self.impulse_streak = {'RED': 0, 'BLUE': 0, 'GREEN': 0}
         
         self.echo_chamber_active = False
         self.echo_chamber_timer = 0.0
@@ -2624,7 +2757,7 @@ class Game:
     def check_resonance_spawn(self, x: float, y: float, mode: str) -> None:
         self.kill_streak[mode] += 1
         
-        for m in MODE_COLORS if False else ['RED', 'BLUE', 'GREEN']:
+        for m in ('RED', 'BLUE', 'GREEN'):
             if m != mode:
                 self.kill_streak[m] = 0
         
@@ -2633,7 +2766,14 @@ class Game:
             self.kill_streak[mode] = 0
     
     def check_impulse_activation(self, mode: str) -> None:
-        if self.kill_streak[mode] >= CFG.IMPULSE_KILL_THRESHOLD:
+        # Отдельный счётчик: резонанс обнуляет kill_streak на 3 убийствах,
+        # поэтому общий счётчик никогда не доходил до порога Impulse (5).
+        self.impulse_streak[mode] += 1
+        for m in ('RED', 'BLUE', 'GREEN'):
+            if m != mode:
+                self.impulse_streak[m] = 0
+        
+        if self.impulse_streak[mode] >= CFG.IMPULSE_KILL_THRESHOLD:
             self.player.impulse_active = True
             self.player.impulse_timer = 3.0
             
@@ -2643,7 +2783,7 @@ class Game:
                 "IMPULSE!", mode_colors[mode], 1.5, 28
             ))
             
-            self.kill_streak[mode] = 0
+            self.impulse_streak[mode] = 0
     
     def activate_echo_chamber(self) -> None:
         self.echo_chamber_active = True
@@ -2670,8 +2810,9 @@ class Game:
         if event.type == pygame.QUIT:
             self.running = False
         
-        elif event.type == pygame.USEREVENT + 1:
-            self.music_system.conductor_restore()
+        elif event.type == CONDUCTOR_RESTORE_EVENT:
+            if self.state in ('PLAYING', 'PAUSED'):
+                self.music_system.conductor_restore()
         
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_F11:
@@ -2687,8 +2828,7 @@ class Game:
             
             if self.state == 'MENU':
                 if event.key == pygame.K_RETURN:
-                    self.state = 'PLAYING'
-                    self.reset_game()
+                    self.start_run()
                 elif event.key == pygame.K_u:
                     self.state = 'UPGRADE_MENU'
             
@@ -2700,6 +2840,9 @@ class Game:
             elif self.state == 'PLAYING':
                 if event.key == pygame.K_ESCAPE or event.key == pygame.K_p:
                     self.state = 'PAUSED'
+                elif event.key == pygame.K_SPACE:
+                    # Dash по нажатию (KEYDOWN), а не каждый кадр удержания
+                    self.player.start_dash(self)
                 elif event.key in (pygame.K_1, pygame.K_q):
                     self.player.set_mode('RED', self)
                     self.chromatic_buffer.record_change(self.game_time, 'RED')
@@ -2718,8 +2861,7 @@ class Game:
             
             elif self.state == 'GAME_OVER':
                 if event.key == pygame.K_r:
-                    self.state = 'PLAYING'
-                    self.reset_game()
+                    self.start_run()
                 elif event.key == pygame.K_u:
                     self.state = 'UPGRADE_MENU'
                 elif event.key == pygame.K_ESCAPE:
@@ -2729,6 +2871,12 @@ class Game:
             if event.button == 3:
                 if self.state == 'PLAYING':
                     self.player.start_dash(self)
+    
+    def start_run(self) -> None:
+        """Единая точка входа в новый забег (меню и рестарт)."""
+        self.state = 'PLAYING'
+        self.reset_game()
+        self.music_system.start()
     
     def update_playing(self, dt: float) -> None:
         self.game_time += dt
@@ -2748,7 +2896,9 @@ class Game:
         self.crystal.update(dt, self.player.x, self.player.y,
                             self.player.mode, self.combo)
         
-        self.music_system.update(dt, self.game_time, self.beat_tracker)
+        if self.beat_tracker.update(dt, self.game_time):
+            self.music_system.on_beat()
+        self.music_system.update(dt)
         
         if self.echo_chamber_active:
             self.echo_chamber_timer -= dt
@@ -2824,6 +2974,8 @@ class Game:
                     
                     if bullet.is_piercing:
                         bullet.hit_enemies.append(enemy.id)
+                        # Пробивающая пуля продолжает проверку остальных врагов
+                        continue
                     else:
                         bullets_to_remove.append(i)
                     break
@@ -2852,6 +3004,8 @@ class Game:
                     self.perfect_refraction(bullet)
                     bullets_to_remove.append(i)
                 else:
+                    if self.player.can_be_damaged(self):
+                        self.telemetry.on_refraction_attempt(False)
                     self.player.take_damage(bullet.damage, self,
                                             bullet.x, bullet.y)
                     bullets_to_remove.append(i)

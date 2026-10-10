@@ -1,0 +1,83 @@
+name: Release
+
+# Релиз собирается автоматически, когда на main меняется файл VERSION.
+on:
+  push:
+    branches: [main]
+    paths: ['VERSION']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame numpy
+      - name: Unit tests (headless)
+        working-directory: chromashift
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: python -m unittest discover -s tests -v
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame numpy pyinstaller
+      - name: Generate sound assets
+        working-directory: chromashift
+        run: python -m cshift.sound_design assets/sounds
+      - name: Unit tests on Windows
+        working-directory: chromashift
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: python -m unittest discover -s tests
+      - name: Build exe
+        working-directory: chromashift
+        run: pyinstaller --noconfirm --onefile --windowed --name ChromaShift --add-data "assets;assets" --hidden-import numpy main.py
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION).Trim()
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item chromashift/dist/ChromaShift.exe pkg/
+          Copy-Item README.md, CHANGELOG.md pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "ChromaShift-$v-windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: ChromaShift-*-windows.zip
+
+  release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+      - id: v
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Source archive (без venv)
+        run: git archive --format=zip -o "ChromaShift-${{ steps.v.outputs.version }}-source.zip" HEAD -- . ':(exclude)chromashift/venv'
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: ChromaShift ${{ steps.v.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          make_latest: true
+          files: |
+            ChromaShift-*-windows.zip
+            ChromaShift-*-source.zip
