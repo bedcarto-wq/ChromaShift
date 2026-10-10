@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def main() -> None:
     from cshift.config import BASE_DIR
     log_path = os.path.join(BASE_DIR, 'chromashift.log')
-    handlers = [logging.StreamHandler()]
+    handlers = [logging.StreamHandler()] if sys.stderr is not None else []  # в exe --windowed консоли нет
     try:
         handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
     except OSError:
