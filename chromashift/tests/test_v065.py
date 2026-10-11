@@ -656,7 +656,9 @@ class TestScreens(unittest.TestCase):
         g.ui.push(s)
         s.on_action('confirm')
         self.assertEqual(g.profile.data['upgrades'].get('core_hp'), 1)
-        s.on_action('reset')
+        s.on_action('reset')  # 0.7.0: меню сброса (ветка / всё дерево)
+        g.ui.top().on_action('down')  # «Сбросить всё дерево»
+        g.ui.top().on_action('confirm')
         g.ui.top().on_action('up')  # «Да»
         g.ui.top().on_action('confirm')
         self.assertEqual(g.profile.data['upgrades'], {})
