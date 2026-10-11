@@ -1,15 +1,16 @@
-"""Интерфейс ChromaShift 0.6.5: HUD, отрисовка мира и все экраны меню."""
+"""Интерфейс ChromaShift 0.7.0: HUD, отрисовка мира и все экраны меню."""
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pygame
 
-from .config import CFG, GAME_VERSION, MODES
+from .config import ALL_MODES, CFG, GAME_VERSION, MODES
 from .entities import MODE_SHAPES, ENEMY_NAMES, ELITE_MODS, BossEnemy, draw_shape
-from .progression import (ACHIEVEMENTS, ARCHETYPES, ARTIFACTS, BRANCHES, COSMETICS, DIFFICULTIES, HULLS,
+from .progression import (ACHIEVEMENTS, ARCHETYPES, ARTIFACT_SETS, ARTIFACTS, RARITY_NAMES, artifact_preview, BRANCHES, COSMETICS, DIFFICULTIES, HULLS,
                           MODULES, PROFILE_SLOTS, RISKS, TENSION_LEVELS, UPGRADES, Profile, active_synergies,
                           branch_spent, challenge_setup, loadout_energy, node_status, preview_node)
 from .settings import ACTION_NAMES, CHOICE_NAMES, radial_sectors
+from .hires import get_scale, layer
 from .utils import clamp, color_lerp, get_font, mode_color, visual
 
 FONT = 'arial'
@@ -63,12 +64,12 @@ _PANEL_CACHE: Dict[Tuple[int, int, int], pygame.Surface] = {}
 def panel(surf: pygame.Surface, rect: Tuple[int, int, int, int], alpha: int = 200,
           border: Optional[Tuple[int, int, int]] = None) -> None:
     x, y, w, h = [int(v) for v in rect]
-    key = (w, h, alpha)
+    key = (w, h, alpha, get_scale())
     s = _PANEL_CACHE.get(key)
     if s is None:
         if len(_PANEL_CACHE) > 64:
             _PANEL_CACHE.clear()
-        s = pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
+        s = layer((max(1, w), max(1, h)), pygame.SRCALPHA)
         s.fill((14, 18, 30, alpha))
         _PANEL_CACHE[key] = s
     surf.blit(s, (x, y))
@@ -123,10 +124,62 @@ def draw_background(game: Any, surf: pygame.Surface, menu: bool = False) -> None
         pygame.draw.line(surf, grid, (0, y), (CFG.SCREEN_WIDTH, y), 1)
 
 
+_FX_CACHE: Dict[Any, Any] = {}
+
+
+def clear_ui_caches() -> None:
+    """Вызывается при смене масштаба рендера."""
+    _PANEL_CACHE.clear()
+    _FX_CACHE.clear()
+
+
+def draw_post_fx(game: Any, surf: pygame.Surface) -> None:
+    """Виньетка (кэшируется) и красное свечение по краям при низком HP."""
+    W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
+    vig = _FX_CACHE.get('vignette')
+    if vig is None:
+        vig = layer((W, H), pygame.SRCALPHA)
+        steps = 14
+        for i in range(steps):
+            a = int(70 * (1 - i / steps) ** 2)
+            pygame.draw.rect(vig, (0, 0, 0, a), (i * 6, i * 5, W - i * 12, H - i * 10), 6)
+        _FX_CACHE['vignette'] = vig
+    surf.blit(vig, (0, 0))
+    p = getattr(game, 'player', None)
+    if p is not None and p.max_hp > 0 and p.hp / p.max_hp < 0.3 and p.hp > 0:
+        low = _FX_CACHE.get('lowhp')
+        if low is None:
+            low = layer((W, H), pygame.SRCALPHA)
+            for i in range(10):
+                pygame.draw.rect(low, (220, 30, 40, int(60 * (1 - i / 10))), (i * 4, i * 4, W - i * 8, H - i * 8), 4)
+            _FX_CACHE['lowhp'] = low
+        surf.blit(low, (0, 0))
+
+
+def draw_minimap(game: Any, surf: pygame.Surface) -> None:
+    """Миникарта арены в правом нижнем углу: игрок, враги (цветом уязвимости), боссы крупнее."""
+    W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
+    mw, mh = 176, 99
+    x0, y0 = 14, H - mh - 44
+    panel(surf, (x0, y0, mw, mh), 150)
+    k = mw / W
+    for e in getattr(game, 'enemies', []):
+        if not getattr(e, 'alive', True):
+            continue
+        c = getattr(e, 'color_tag', None) or getattr(e, 'vulnerable_mode', None)
+        col = mode_color(c) if c in ALL_MODES else (230, 90, 90)
+        ex = int(clamp(x0 + e.x * k, x0 + 2, x0 + mw - 2))
+        ey = int(clamp(y0 + e.y * k, y0 + 2, y0 + mh - 2))
+        pygame.draw.circle(surf, col, (ex, ey), 4 if isinstance(e, BossEnemy) or e.radius > 30 else 2)
+    p = getattr(game, 'player', None)
+    if p is not None:
+        pygame.draw.circle(surf, (255, 255, 255), (int(x0 + p.x * k), int(y0 + p.y * k)), 3)
+
+
 def _dark_overlay(game: Any) -> pygame.Surface:
-    if game._dark_surf is None:
+    if game._dark_surf is None or getattr(game._dark_surf, 's', 1.0) != get_scale():
         r = 280
-        s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+        s = layer((r * 2, r * 2), pygame.SRCALPHA)
         s.fill((0, 0, 0, 235))
         for i in range(r, 0, -4):
             a = int(235 * (i / r) ** 2)
@@ -138,8 +191,21 @@ def _dark_overlay(game: Any) -> pygame.Surface:
 def draw_world(game: Any, surf: pygame.Surface) -> None:
     draw_background(game, surf)
     t = game.game_time
+    for z in getattr(game, 'paints', ()):
+        z.draw(surf)
     for r in game.resonances:
         r.draw(surf)
+    for pt in getattr(game, 'portals', ()):
+        pt.draw(surf, t)
+    cm = getattr(game, 'color_mech', None)
+    if cm is not None:
+        for w in cm.wells:
+            k = 0.5 + 0.5 * math.sin(t * 5)
+            pygame.draw.circle(surf, color_lerp(CFG.COLOR_BG, mode_color('BLUE'), 0.3 + 0.3 * k),
+                               (int(w.x), int(w.y)), int(w.radius), 1)
+            pygame.draw.circle(surf, mode_color('BLUE'), (int(w.x), int(w.y)), int(10 + 6 * k), 2)
+    for mn in getattr(game, 'mines', ()):
+        mn.draw(surf, t)
     for pl in game.pillars:
         pl.draw(surf)
     for h in game.hazards:
@@ -167,16 +233,26 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
     for e in game.enemies:
         e.draw(surf)
         e.draw_overlay(surf, t)
+        if e.stun_t > 0:
+            pygame.draw.circle(surf, CFG.COLOR_ACCENT, (int(e.x), int(e.y)), int(e.radius + 5), 1)
+        if e.is_leader:
+            draw_shape(surf, 'triangle', CFG.COLOR_ACCENT, e.x, e.y - e.radius - 9, 5, -math.pi / 2, 0)
+    for wl in getattr(game, 'walls', ()):
+        wl.draw(surf)
+    for bm in getattr(game, 'beams', ()):
+        bm.draw(surf)
     p = game.player
     if game.dying_timer < 0 and game.in_run:
         p.draw(surf, t)
         game.parry_indicator.draw(surf, p.x, p.y)
         game.crystal.draw(surf, p.x, p.y, p.mode, game.combo, t)
     game.particles.draw(surf)
-    if game.director.special == 'darkness' and game.director.state == 'active':
+    dark_on = ((game.director.special == 'darkness' and game.director.state == 'active')
+               or (getattr(game.mods, 'always_dark', False) and game.in_run and not game.is_training))
+    if dark_on:
         dark = _dark_overlay(game)
         r = dark.get_width() // 2
-        cover = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+        cover = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
         cover.fill((0, 0, 0, 235))
         cover.fill((0, 0, 0, 0), (int(p.x - r), int(p.y - r), r * 2, r * 2))
         surf.blit(cover, (0, 0))
@@ -185,7 +261,7 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
     for e in game.enemies:
         if not e.alive:
             continue
-        hidden = game.director.special == 'darkness' and math.hypot(e.x - p.x, e.y - p.y) > 260
+        hidden = dark_on and math.hypot(e.x - p.x, e.y - p.y) > 260
         off = e.x < 0 or e.y < 0 or e.x > CFG.SCREEN_WIDTH or e.y > CFG.SCREEN_HEIGHT
         if hidden or off:
             ang = math.atan2(e.y - p.y, e.x - p.x)
@@ -207,7 +283,7 @@ def draw_world(game: Any, surf: pygame.Surface) -> None:
             pygame.draw.circle(surf, mode_color(m), (int(cx), int(cy)), 26 if sel else 20, 0 if sel else 3)
             text(surf, m, 14, CFG.COLOR_TEXT, (cx, cy + 28), 'center', True)
     if game.flash_alpha > 0:
-        fs = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+        fs = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
         fs.fill((*game.flash_color, int(255 * clamp(game.flash_alpha, 0, 1))))
         surf.blit(fs, (0, 0))
 
@@ -239,7 +315,7 @@ class HUD:
         y += 14
         # Режимы
         keys = g.settings.get('keys', {})
-        for i, mode in enumerate(MODES):
+        for i, mode in enumerate(g.available_modes() if hasattr(g, 'available_modes') else MODES):
             x = m + i * 46
             sel = p.mode == mode
             col = mode_color(mode)
@@ -249,6 +325,31 @@ class HUD:
                 pygame.draw.circle(surf, col, (x + 16, y + 16), 13 if sel else 9, 0 if sel else 2)
             text(surf, keys.get(f'mode_{mode.lower()}', str(i + 1)).upper(), 11, (170, 180, 200), (x + 16, y + 32), 'center')
         y += 50
+        cm = getattr(g, 'color_mech', None)
+        if cm is not None and not g.settings.get('hud_compact', False):
+            # Перегрузка, навык цвета (R), способность (F), осколки
+            if cm.overload_t > 0:
+                bar(surf, (m, y, 120, 6), cm.overload_t / (5.0 + g.mods.overload_duration_add), CFG.COLOR_ACCENT)
+                text(surf, 'ПЕРЕГРУЗКА', 12, CFG.COLOR_ACCENT, (m + 126, y - 4), bold=True)
+            else:
+                bar(surf, (m, y, 120, 6), cm.overload / CFG.OVERLOAD_MAX, (200, 170, 255))
+                text(surf, 'Перегрузка', 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            from .mechanics import ABILITIES, COLOR_SKILLS
+            skill_max = CFG.COLOR_SKILL_COOLDOWN * g.mods.skill_cd_mult
+            bar(surf, (m, y, 120, 6), 1 - clamp(cm.skill_cd / max(0.01, skill_max), 0, 1), mode_color(p.mode))
+            text(surf, f"{keys.get('skill', 'r').upper()}: {COLOR_SKILLS[p.mode][0]}", 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            ab = ABILITIES.get(cm.ability, ABILITIES['nova'])
+            bar(surf, (m, y, 120, 6), 1 - clamp(cm.ability_cd / max(0.01, ab['cd'] * g.mods.ability_cd_mult), 0, 1),
+                CFG.COLOR_PRIMARY)
+            text(surf, f"{keys.get('ability', 'f').upper()}: {ab['name']}", 12, (170, 180, 200), (m + 126, y - 4))
+            y += 14
+            text(surf, f"Осколки: {cm.shards}", 12, (200, 190, 255), (m, y))
+            y += 18
+        if p.color_lock_t > 0 and p.color_lock_t < 9000:
+            text(surf, f"ЦВЕТ ЗАБЛОКИРОВАН {p.color_lock_t:.1f} c", 14, (170, 170, 190), (m, y), bold=True)
+            y += 18
         if p.impulse_active:
             text(surf, f"ИМПУЛЬС {p.impulse_timer:.1f} c", 16, mode_color(p.mode), (m, y), bold=True)
             y += 20
@@ -280,6 +381,21 @@ class HUD:
                 tags.append(f"Напряжение {g.tension}")
             if d.overheat:
                 tags.append('ПЕРЕГРЕВ')
+            if d.gamble:
+                tags.append('СТАВКА')
+            elif d.gamble_next:
+                tags.append('Ставка на следующую волну')
+            if d.tempo:
+                tags.append('ТЕМП')
+            if getattr(g, 'daily_rule', 'none') != 'none':
+                from .progression import DAILY_RULES
+                tags.append(DAILY_RULES[g.daily_rule][0])
+            if g.run_type == 'blitz':
+                tags.append(f"Осталось {int(g.blitz_left // 60)}:{int(g.blitz_left % 60):02d}")
+            if d.special == 'survive' and d.state == 'active':
+                tags.append(f"Продержитесь ещё {max(0.0, d.survive_left):.0f} c")
+            if d.state == 'intermission' and d.wave > 0:
+                tags.append(f"{keys.get('gamble', 'b').upper()} — ставка")
             if tags:
                 text(surf, ' · '.join(tags), 12, (180, 170, 140), (W / 2, m + 28), 'center')
             # Призрак рекорда
@@ -288,13 +404,18 @@ class HUD:
                 gw = sum(1 for tt in ghost if tt <= g.game_time) + 1
                 text(surf, f"Призрак рекорда: волна {gw}", 12, (150, 160, 190), (W - m, m + 54), 'right')
         # Босс
-        boss = next((e for e in g.enemies if isinstance(e, BossEnemy) and e.alive), None)
+        boss = next((e for e in g.enemies if e.alive and (isinstance(e, BossEnemy) or getattr(e, 'boss_like', False))),
+                    None)
         if boss is not None:
             bw = 520
             bx = W / 2 - bw / 2
-            bar(surf, (bx, 52, bw, 12), boss.hp / boss.max_hp, mode_color(boss.vulnerable_mode))
-            text(surf, f"{boss.name} · фаза {boss.phase} · уязвим к {boss.vulnerable_mode}", 14, CFG.COLOR_TEXT,
-                 (W / 2, 66), 'center', True)
+            vm = boss.vulnerable_mode
+            bar(surf, (bx, 52, bw, 12), max(0.0, boss.hp) / boss.max_hp, mode_color(vm) if vm else CFG.COLOR_DANGER)
+            title = getattr(boss, 'title', None) or boss.name
+            ph = getattr(boss, 'phase', 1)
+            weak = f" · уязвим к {vm}" if vm else (' · сначала головы' if getattr(boss, 'heads', None)
+                                                  and any(h.alive for h in boss.heads) else '')
+            text(surf, f"{title} · фаза {ph}{weak}", 14, CFG.COLOR_TEXT, (W / 2, 66), 'center', True)
         # Такт
         since = g.game_time - g.beat_tracker.last_beat_time
         pulse = clamp(1 - since / CFG.BEAT_INTERVAL, 0, 1)
@@ -497,7 +618,7 @@ class ListScreen(Screen):
     def draw(self, surf: pygame.Surface) -> None:
         W = CFG.SCREEN_WIDTH
         if self.show_world:
-            veil = pygame.Surface((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
+            veil = layer((CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT), pygame.SRCALPHA)
             veil.fill((5, 6, 12, 170))
             surf.blit(veil, (0, 0))
         text(surf, self.title, 40, CFG.COLOR_ACCENT, (80, 40), bold=True)
@@ -526,7 +647,7 @@ class ListScreen(Screen):
             text(surf, it.get_label(), 19, col, (r.x + 14, r.y + 7), bold=sel)
             if it.value:
                 v = it.value()
-                arrow = ('◀ ' + v + ' ▶') if (it.left or it.right) and sel else v
+                arrow = ('◄ ' + v + ' ►') if (it.left or it.right) and sel else v
                 text(surf, arrow, 17, CFG.COLOR_ACCENT if sel else (180, 190, 210), (r.right - 14, r.y + 9), 'right')
         if len(self.items) > self.rows_visible:
             frac = self.scroll / max(1, len(self.items) - self.rows_visible)
@@ -599,6 +720,12 @@ class MainMenu(ListScreen):
             Item('Ангар', confirm=lambda: g.ui.push(HangarScreen(g)), desc='Корпус, модули, синергии и пресеты'),
             Item('Дерево улучшений', confirm=lambda: g.ui.push(UpgradeTreeScreen(g)),
                  desc='Постоянные улучшения за Chroma Points'),
+            Item('Сборки и престиж', confirm=lambda: g.ui.push(BuildsScreen(g)),
+                 desc='3 слота сборок, пресеты, код CS7-… для обмена, престиж'),
+            Item('Испытания цвета', confirm=lambda: g.ui.push(TrialsScreen(g)),
+                 desc='Короткие задания на каждый цвет и Преломление. Награда CP за первое прохождение'),
+            Item('Свои волны', confirm=lambda: g.ui.push(WaveEditorScreen(g)),
+                 desc='Редактор сценария: состав врагов, спецволны и боссы по волнам'),
             Item('Внешний вид', confirm=lambda: g.ui.push(CosmeticsScreen(g)), desc='Форма корабля, след и титул'),
             Item('Профили', confirm=lambda: g.ui.push(ProfilesScreen(g)), desc='3 слота, экспорт и импорт'),
             Item('Статистика', confirm=lambda: g.ui.push(StatsScreen(g)), desc='Итоги, история, график прогресса'),
@@ -628,10 +755,13 @@ class MainMenu(ListScreen):
         y += 28
         for c in p.data['contracts'].get('list', []):
             col = CFG.COLOR_SUCCESS if c['done'] else CFG.COLOR_TEXT
-            y = text_block(surf, f"{'✓ ' if c['done'] else ''}{c['desc']} — {c['progress']}/{c['goal']} (+{c['reward']} CP)",
+            y = text_block(surf, f"{'√ ' if c['done'] else ''}{c['desc']} — {c['progress']}/{c['goal']} (+{c['reward']} CP)",
                            15, col, rect.x + 16, y, rect.w - 32)
             y += 4
         y += 12
+        note = getattr(self.game, 'update_notice', '')
+        if note:
+            y = text_block(surf, note, 14, CFG.COLOR_SUCCESS, rect.x + 16, y, rect.w - 32) + 8
         st = p.data['stats']
         text(surf, f"Лучшая волна: {st['best_wave']} · Лучший счёт: {st['best_score']}", 15, (180, 190, 210), (rect.x + 16, y))
         y += 22
@@ -651,9 +781,9 @@ class PlayMenu(ListScreen):
 
     def build(self) -> None:
         g = self.game
-        self.run_types = ['standard', 'daily', 'weekly', 'pure', 'training']
+        self.run_types = ['standard', 'endless', 'blitz', 'bossrush', 'daily', 'weekly', 'pure', 'training']
         self.rt = 0
-        self.arenas = ['classic', 'pillars', 'prism']
+        self.arenas = ['classic', 'pillars', 'prism', 'portals']
         self.arena = 0
         self.tension = min(g.profile.data['tension_unlocked'], 0)
         self.start_mode = 0
@@ -671,13 +801,14 @@ class PlayMenu(ListScreen):
             self.tension = int(clamp(self.tension + s, 0, g.profile.data['tension_unlocked']))
 
         def sm_step(s: int) -> None:
-            self.start_mode = (self.start_mode + s) % 3
+            self.start_mode = (self.start_mode + s) % len(MODES)
         self.items = [
             Item('Режим', lambda: self.RUN_TYPES[self.run_types[self.rt]], left=lambda: rt_step(-1), right=lambda: rt_step(1),
                  desc=self.mode_desc),
             Item('Арена', lambda: self.ARENAS[self.arenas[self.arena]] if not self.fixed() else 'по испытанию',
                  left=lambda: ar_step(-1), right=lambda: ar_step(1), enabled=lambda: not self.fixed(),
-                 desc='Классика — открытое поле; Колонны — укрытия гасят пули; Призма — постоянные зоны Резонанса'),
+                 desc='Классика — открытое поле; Колонны — укрытия гасят пули; Призма — постоянные зоны Резонанса; '
+                      'Порталы — пары порталов переносят корабль и пули'),
             Item('Стартовый цвет', lambda: MODES[self.start_mode], left=lambda: sm_step(-1), right=lambda: sm_step(1),
                  enabled=lambda: not self.fixed(), desc='С какого режима начнётся забег'),
             Item('Хроматическое напряжение', lambda: str(self.tension) if not self.fixed() else 'по испытанию',
@@ -695,7 +826,7 @@ class PlayMenu(ListScreen):
         return self.run_types[self.rt] in ('daily', 'weekly')
 
     def allow_mods(self) -> bool:
-        return self.run_types[self.rt] in ('standard', 'pure')
+        return self.run_types[self.rt] in ('standard', 'pure', 'endless', 'blitz', 'bossrush')
 
     def toggle_risk(self, rid: str) -> None:
         if rid in self.risks:
@@ -712,7 +843,10 @@ class PlayMenu(ListScreen):
             'weekly': f"Сложнее ежедневного, условия на неделю. Лучший: {p.data['weekly'].get('best', 0) if p.data['weekly'].get('key') == challenge_setup('weekly')['key'] else 0}",
             'pure': 'Без улучшений, модулей и артефактов — честный навык. Отдельный рекорд',
             'training': 'Манекены и турели, урон отключён, награды не начисляются',
-        }[rt]
+            'endless': 'Без победы на 30-й волне: волны растут бесконечно, спецволны чаще. Отдельный рекорд',
+            'blitz': 'Ровно 10 минут, волны идут без пауз. Цель — максимум очков',
+            'bossrush': 'Только боссы подряд: Ядро, Гидра, Спектр. Победа — после третьего',
+        }.get(rt, '')
 
     def tension_desc(self) -> str:
         t = self.tension
@@ -736,143 +870,6 @@ class PlayMenu(ListScreen):
         rt = self.run_types[self.rt]
         self.game.start_run(rt, self.tension if self.allow_mods() else 0, self.risks if self.allow_mods() else [],
                             self.arenas[self.arena], MODES[self.start_mode])
-
-
-# =====================================================================
-# ДЕРЕВО УЛУЧШЕНИЙ (визуальное)
-# =====================================================================
-class UpgradeTreeScreen(Screen):
-    def __init__(self, game: Any):
-        super().__init__(game)
-        self.branches = list(BRANCHES)
-        self.col = 0
-        self.row = 0
-        self.message = ''
-        self.message_t = 0.0
-        self.node_rects: List[Tuple[str, pygame.Rect]] = []
-
-    def column(self, b: str) -> List[str]:
-        return sorted([nid for nid, n in UPGRADES.items() if n['branch'] == b],
-                      key=lambda nid: (UPGRADES[nid]['row'], nid))
-
-    def current(self) -> str:
-        col = self.column(self.branches[self.col])
-        self.row = int(clamp(self.row, 0, len(col) - 1))
-        return col[self.row]
-
-    def say(self, m: str) -> None:
-        self.message, self.message_t = m, 3.0
-
-    def update(self, dt: float) -> None:
-        super().update(dt)
-        self.message_t -= dt
-
-    def on_action(self, act: str) -> None:
-        p = self.game.profile
-        if act == 'left':
-            self.col = (self.col - 1) % len(self.branches)
-            self.snd()
-        elif act == 'right':
-            self.col = (self.col + 1) % len(self.branches)
-            self.snd()
-        elif act == 'up':
-            self.row -= 1
-            self.snd()
-        elif act == 'down':
-            self.row += 1
-            self.snd()
-        elif act == 'confirm':
-            ok, msg = p.buy_upgrade(self.current())
-            self.say(msg)
-            if ok:
-                p.save()
-                self.snd('ui_select')
-        elif act == 'reset':
-            def do_reset() -> None:
-                refund = p.reset_upgrades()
-                p.save()
-                self.say(f"Сброс: возвращено {refund} CP")
-            self.game.ui.push(ConfirmScreen(self.game, 'Сброс дерева', 'Вернуть все вложенные CP и сбросить улучшения?', do_reset))
-        elif act == 'back':
-            self.game.ui.pop()
-
-    def on_mouse(self, pos: Tuple[float, float], click: bool) -> None:
-        for nid, r in self.node_rects:
-            if r.collidepoint(pos):
-                b = UPGRADES[nid]['branch']
-                self.col = self.branches.index(b)
-                self.row = self.column(b).index(nid)
-                if click:
-                    self.on_action('confirm')
-
-    def draw(self, surf: pygame.Surface) -> None:
-        g = self.game
-        p = g.profile
-        text(surf, 'Дерево улучшений', 36, CFG.COLOR_ACCENT, (60, 24), bold=True)
-        text(surf, f"CP: {p.cp}", 22, CFG.COLOR_TEXT, (CFG.SCREEN_WIDTH - 60, 32), 'right', True)
-        rec = p.recommended_upgrade()
-        self.node_rects = []
-        col_w = 220
-        x0 = 60
-        cur = self.current()
-        for ci, b in enumerate(self.branches):
-            name, col = BRANCHES[b]
-            col = col or mode_color(b)
-            x = x0 + ci * (col_w + 12)
-            text(surf, f"{name} ({branch_spent(p.data['upgrades'], b)} CP)", 18, col, (x, 78), bold=True)
-            nodes = self.column(b)
-            positions = {}
-            for ri, nid in enumerate(nodes):
-                y = 108 + ri * 54
-                r = pygame.Rect(x, y, col_w, 46)
-                positions[nid] = r
-                self.node_rects.append((nid, r))
-            for nid in nodes:
-                for req in UPGRADES[nid]['requires']:
-                    if req in positions:
-                        a, bb = positions[req], positions[nid]
-                        pygame.draw.line(surf, (80, 90, 120), (a.x + 8, a.centery), (bb.x + 8, bb.centery), 2)
-            for nid in nodes:
-                r = positions[nid]
-                node = UPGRADES[nid]
-                status, _ = node_status(p, nid)
-                lvl = p.data['upgrades'].get(nid, 0)
-                fill = {'maxed': (30, 60, 45), 'available': (35, 45, 75), 'expensive': (40, 40, 55),
-                        'locked': (22, 24, 32), 'blocked': (45, 25, 30)}[status]
-                pygame.draw.rect(surf, fill, r)
-                border = col if status in ('available', 'maxed') else (70, 75, 95)
-                if nid == cur:
-                    border = CFG.COLOR_ACCENT
-                pygame.draw.rect(surf, border, r, 3 if nid == cur else 1)
-                if node['key']:
-                    draw_shape(surf, 'diamond', CFG.COLOR_ACCENT, r.right - 12, r.y + 12, 6)
-                if node['tradeoff']:
-                    text(surf, '⇄', 14, CFG.COLOR_DANGER, (r.right - 28, r.y + 3))
-                if nid == rec:
-                    text(surf, '★', 16, CFG.COLOR_ACCENT, (r.right - 46, r.y + 2))
-                tcol = CFG.COLOR_TEXT if status != 'locked' else (110, 115, 135)
-                text(surf, node['name'], 15, tcol, (r.x + 8, r.y + 4), bold=nid == cur)
-                text(surf, f"{lvl}/{node['max']}", 13, (170, 180, 205), (r.x + 8, r.y + 25))
-                if lvl < node['max']:
-                    text(surf, f"{node['costs'][lvl]} CP", 13, CFG.COLOR_ACCENT if status == 'available' else (130, 130, 150),
-                         (r.right - 8, r.y + 25), 'right')
-        # Панель описания
-        node = UPGRADES[cur]
-        status, reason = node_status(p, cur)
-        side = pygame.Rect(60, 560, CFG.SCREEN_WIDTH - 120, 130)
-        panel(surf, side, 190)
-        text(surf, node['name'] + ('  (ключевой узел)' if node['key'] else '') + ('  (компромисс)' if node['tradeoff'] else ''),
-             20, CFG.COLOR_ACCENT, (side.x + 14, side.y + 8), bold=True)
-        text(surf, node['desc'], 16, CFG.COLOR_TEXT, (side.x + 14, side.y + 36))
-        text(surf, reason, 15, CFG.COLOR_SUCCESS if status == 'available' else (200, 160, 160), (side.x + 14, side.y + 60))
-        pv = preview_node(p, cur) if status != 'maxed' else []
-        text(surf, 'Предпросмотр: ' + '; '.join(pv[:3]) if pv else '', 15, (180, 200, 230), (side.x + 14, side.y + 84))
-        if rec:
-            text(surf, f"★ Рекомендация под ваш стиль: {UPGRADES[rec]['name']}", 14, CFG.COLOR_ACCENT, (side.right - 14, side.y + 8), 'right')
-        text(surf, '←→ ветка · ↑↓ узел · Enter — купить · R — полный сброс с возвратом CP · Esc — назад', 14,
-             (130, 140, 165), (60, CFG.SCREEN_HEIGHT - 26))
-        if self.message_t > 0:
-            text(surf, self.message, 18, CFG.COLOR_ACCENT, (CFG.SCREEN_WIDTH / 2, 530), 'center', True)
 
 
 # =====================================================================
@@ -910,7 +907,7 @@ class HangarScreen(ListScreen):
                 p.save()
                 return f"Корпус: {HULLS[hid]['name']}"
             self.items.append(Item(f"Корпус: {h['name']}",
-                                   (lambda hid=hid: '✓ выбран' if p.loadout['hull'] == hid else
+                                   (lambda hid=hid: '√ выбран' if p.loadout['hull'] == hid else
                                     ('открыт' if hid in p.data['hulls'] else f"{HULLS[hid]['cost']} CP + {HULLS[hid]['prisms']} пр.")),
                                    confirm=hull_action,
                                    desc=f"{h['desc']}. Слотов: {h['slots']}, энергия: {h['energy']}"))
@@ -925,7 +922,7 @@ class HangarScreen(ListScreen):
                 return msg
             conflicts = ', '.join(MODULES[c]['name'] for c in m['conflicts'])
             self.items.append(Item(f"Модуль: {m['name']}",
-                                   (lambda mid=mid: '✓ установлен' if mid in p.loadout['modules'] else
+                                   (lambda mid=mid: '√ установлен' if mid in p.loadout['modules'] else
                                     ('открыт' if mid in p.data['modules'] else f"{MODULES[mid]['cost']} CP")),
                                    confirm=mod_action,
                                    desc=f"{m['desc']}. Энергия: {m['energy']}" + (f". Несовместим: {conflicts}" if conflicts else '')))
@@ -1178,8 +1175,26 @@ class AudioVideoScreen(ListScreen):
             _bool_item(g, 'Музыка', 'music', 'Процедурная музыка подстраивается под ваш стиль и давление волны'),
             _choice_item(g, 'Тема фона', 'bg_theme'),
             _bool_item(g, 'Показывать FPS', 'show_fps'),
+            Item('Качество рендера', lambda: CHOICE_NAMES.get(g.settings.get('render_quality'), '?'),
+                 left=lambda: self.quality(-1), right=lambda: self.quality(1),
+                 desc='Чёткая — отрисовка в родном разрешении окна (без размытия на полном экране). '
+                      'Сбалансированная — до 1.5×. Классическая — 720p с масштабированием'),
+            _choice_item(g, 'Ограничение FPS', 'fps_cap', 'Выше — плавнее на мониторах 120/144 Гц'),
+            _bool_item(g, 'Числа урона', 'damage_numbers', 'Всплывающие числа урона и криты'),
+            _bool_item(g, 'Постэффекты', 'post_fx', 'Виньетка и свечение по краям экрана'),
+            _bool_item(g, 'Компактный HUD', 'hud_compact', 'Меньше подсказок и тегов на экране'),
+            _bool_item(g, 'Замедление на последнем убийстве', 'slowmo'),
+            _bool_item(g, 'Миникарта', 'minimap', 'Схема арены в углу: игрок и враги цветом уязвимости'),
+            _bool_item(g, 'Проверять обновления', 'check_updates',
+                       'Один запрос к GitHub при запуске игры (выключено по умолчанию). Ничего не скачивается'),
             Item('Полный экран', lambda: 'Вкл' if g.settings.get('fullscreen') else 'Выкл', confirm=g.toggle_fullscreen, desc='Также F11'),
         ]
+
+    def quality(self, s: int) -> None:
+        g = self.game
+        g.settings.cycle('render_quality', s)
+        if hasattr(g, 'ensure_render_scale'):
+            g.ensure_render_scale()
 
     def on_action(self, act: str) -> None:
         super().on_action(act)
@@ -1360,7 +1375,7 @@ class AchievementsScreen(ListScreen):
             if cosmetic:
                 k, v = cosmetic.split(':', 1)
                 extra = f"\nНаграда-косметика: {COSMETICS[k].get(v, v)}"
-            self.items.append(Item(('✓ ' if got else '') + name,
+            self.items.append(Item(('√ ' if got else '') + name,
                                    (lambda got=got, cur=cur, g=g: 'получено' if got else (f"{int(min(cur, g))}/{int(g)}" if g > 1 else '—')),
                                    desc=f"{desc}. Награда: {reward} CP{extra}",
                                    color=CFG.COLOR_SUCCESS if got else None))
@@ -1386,16 +1401,36 @@ class CodexScreen(ListScreen):
         'Эхо-камера': 'Несколько Преломлений подряд замедляют вражеские пули',
         'В такт': 'Убийства в ритм музыки дают ×1.5 очков',
         'Элиты': ', '.join(v[0] for v in ELITE_MODS.values()) + '. Цветной щит — урон только своим цветом',
+        'VIOLET': 'Четвёртый цвет (открывается в ветке «Фаза»): пули пробивают врагов, рывок короче, но фазовый',
+        'Поглощение': 'Цветная пуля, луч или мина твоего текущего цвета поглощается и копит Перегрузку',
+        'Перегрузка': 'Полная шкала — мощный залп текущим цветом',
+        'Смешанный выстрел': 'Смена цвета сразу после выстрела — пуля с свойствами двух цветов',
+        'Хроматический вихрь': 'Три разных цвета за короткое время — вихрь, отталкивающий пули',
+        'Парирование касанием': 'Смена цвета за миг до контакта с врагом — урона нет, враг отброшен',
+        'Навык цвета (R)': 'RED — вспышка, BLUE — колодец, GREEN — шквал, VIOLET — фаза',
+        'Способность (F)': 'Нова, Стоп-кадр, Призменная стена или Сдвиг — выбирается в настройках',
+        'Осколки и магазин': 'Убийства дают осколки; каждые 3 волны — магазин с временными узлами',
+        'Ставка (B)': 'Перед волной: волна сложнее, но награда выше',
+    }
+
+    BOSSES = {
+        'hydra': ('Гидра', 'Босс: при потере здоровья отращивает головы разных цветов. Головы бейте их цветом'),
+        'spectrum': ('Спектр', 'Босс: каждые несколько секунд меняет уязвимый цвет — следите за оболочкой'),
     }
 
     def build(self) -> None:
+        from .enemies_ext import EXT_HINTS, EXT_NAMES
         p = self.game.profile
         codex = p.data['stats']['codex']
+        seen_list = set(p.data.get('codex_seen', [])) | set(p.data.get('seen_enemies', []))
         self.items = []
-        for kind, desc in self.ENTRIES.items():
+        entries = [(k, ENEMY_NAMES.get(k, k), d) for k, d in self.ENTRIES.items()]
+        entries += [(k, EXT_NAMES[k], EXT_HINTS[k]) for k in EXT_HINTS if k in EXT_NAMES]
+        entries += [(k, v[0], v[1]) for k, v in self.BOSSES.items()]
+        for kind, name, desc in entries:
             n = codex.get(kind, 0)
-            seen = n > 0 or kind in ('chaser',)
-            self.items.append(Item(ENEMY_NAMES[kind] if seen else '???', (lambda n=n: f"уничтожено: {n}"),
+            seen = n > 0 or kind in ('chaser',) or kind in seen_list
+            self.items.append(Item(name if seen else '???', (lambda n=n: f"уничтожено: {n}"),
                                    desc=desc if seen else 'Встретьте этого врага, чтобы открыть запись'))
         for name, desc in self.MECHANICS.items():
             self.items.append(Item(f"Механика: {name}", desc=desc))
@@ -1413,6 +1448,10 @@ class PauseScreen(ListScreen):
         self.items = [
             Item('Продолжить', confirm=g.ui.pop),
             Item('Настройки', confirm=lambda: g.ui.push(SettingsScreen(g))),
+            Item('Повтор последних 10 с', confirm=lambda: g.ui.push(ReplayScreen(g)),
+                 desc='Схема последних секунд боя: корабль, враги и пули'),
+            Item('Начать заново (F5)', confirm=lambda: g.ui.push(ConfirmScreen(g, 'Заново', 'Текущий забег будет завершён',
+                                                                               g.restart_run, True))),
             Item('Закончить забег', confirm=lambda: g.ui.push(ConfirmScreen(g, 'Закончить забег', 'Итоги и CP будут начислены', lambda: g.end_run('quit'), True))),
         ]
 
@@ -1451,6 +1490,24 @@ class ArtifactScreen(Screen):
         elif act == 'confirm':
             self.game.take_artifact(self.choices[self.index])
             self.game.ui.pop()
+        elif act == 'reset':
+            self.reroll()
+
+    def reroll(self) -> bool:
+        cm = getattr(self.game, 'color_mech', None)
+        if cm is None or cm.rerolls <= 0:
+            return False
+        import random as _r
+        from .progression import roll_artifacts
+        new = roll_artifacts(_r, self.game.profile.data.get('archetype', 'balanced'), self.game.artifacts,
+                             len(self.choices))
+        if not new:
+            return False
+        cm.rerolls -= 1
+        self.choices = new
+        self.index = 0
+        self.snd('ui_select')
+        return True
 
     def on_mouse(self, pos: Tuple[float, float], click: bool) -> None:
         for i, r in enumerate(self.rects):
@@ -1461,7 +1518,7 @@ class ArtifactScreen(Screen):
 
     def draw(self, surf: pygame.Surface) -> None:
         W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
-        veil = pygame.Surface((W, H), pygame.SRCALPHA)
+        veil = layer((W, H), pygame.SRCALPHA)
         veil.fill((5, 6, 12, 180))
         surf.blit(veil, (0, 0))
         text(surf, 'Выберите артефакт', 36, CFG.COLOR_ACCENT, (W / 2, 120), 'center', True)
@@ -1471,7 +1528,7 @@ class ArtifactScreen(Screen):
         x0 = W / 2 - (len(self.choices) * (cw + 30) - 30) / 2
         for i, aid in enumerate(self.choices):
             a = ARTIFACTS[aid]
-            r = pygame.Rect(int(x0 + i * (cw + 30)), 230, cw, 260)
+            r = pygame.Rect(int(x0 + i * (cw + 30)), 200, cw, 330)
             self.rects.append(r)
             sel = i == self.index
             panel(surf, r, 220, CFG.COLOR_ACCENT if sel else None)
@@ -1479,9 +1536,27 @@ class ArtifactScreen(Screen):
             col = {'assault': mode_color('RED'), 'control': mode_color('BLUE'), 'dancer': mode_color('GREEN')}.get(a['arch'], CFG.COLOR_ACCENT)
             draw_shape(surf, 'diamond', col, r.centerx, r.y + 60, 26 + (4 * math.sin(self.time * 4) if sel else 0), self.time if sel else 0)
             text(surf, a['name'], 22, CFG.COLOR_TEXT, (r.centerx, r.y + 110), 'center', True)
-            text_block(surf, a['desc'], 16, (200, 210, 230), r.x + 20, r.y + 150, cw - 40)
+            yy = text_block(surf, a['desc'], 16, (200, 210, 230), r.x + 20, r.y + 140, cw - 40) + 6
+            rarity = a.get('rarity', 'common')
+            if rarity != 'common':
+                rc = (255, 200, 90) if rarity == 'legendary' else (200, 90, 230)
+                text(surf, RARITY_NAMES.get(rarity, rarity), 15, rc, (r.centerx, r.y + 12), 'center', True)
+            try:
+                pv = artifact_preview(self.game.mods, aid)
+            except Exception:  # предпросмотр не должен ронять выбор
+                pv = []
+            for ln in pv[:4]:
+                yy = text_block(surf, ln, 14, (170, 220, 180), r.x + 20, yy, cw - 40)
+            sid = a.get('set')
+            if sid in ARTIFACT_SETS:
+                sd = ARTIFACT_SETS[sid]
+                have = sum(1 for x in self.game.artifacts if ARTIFACTS.get(x, {}).get('set') == sid)
+                text(surf, f"Набор «{sd['name']}» {have}/{sd['need']}", 13, (200, 200, 255), (r.centerx, r.bottom - 50), 'center')
             text(surf, arch, 14, col, (r.centerx, r.bottom - 30), 'center')
-        text(surf, '←→ — выбор · Enter — взять', 14, (150, 160, 185), (W / 2, 520), 'center')
+        cm = getattr(self.game, 'color_mech', None)
+        rr = cm.rerolls if cm is not None else 0
+        text(surf, '←→ — выбор · Enter — взять' + (f" · R — переброс (осталось {rr})" if rr else ''), 14,
+             (150, 160, 185), (W / 2, 560), 'center')
 
 
 class ResultsScreen(ListScreen):
@@ -1496,10 +1571,13 @@ class ResultsScreen(ListScreen):
         g = self.game
         last = (self.run['run_type'], self.run.get('tension', 0), list(self.run.get('risks', [])), self.run.get('arena', 'classic'))
         self.items = [
-            Item('Ещё раз', confirm=lambda: g.start_run(last[0], last[1], last[2], last[3])),
+            Item('Ещё раз', confirm=lambda: g.restart_run() if g.last_run_args else g.start_run(last[0], last[1], last[2], last[3])),
             Item('Дерево улучшений', confirm=lambda: (g.ui.clear(), g.ui.push(MainMenu(g)), g.ui.push(UpgradeTreeScreen(g)))),
             Item('В главное меню', confirm=lambda: (g.ui.clear(), g.ui.push(MainMenu(g)))),
         ]
+        frames = list(getattr(getattr(g, 'color_mech', None), 'replay', []) or [])
+        if frames:
+            self.items.insert(1, Item('Повтор последних 10 с', confirm=lambda: g.ui.push(ReplayScreen(g, frames))))
         p = g.profile
         if (g.settings.get('assist_prompt') and p.data['death_streak'] >= 3 and g.settings.get('difficulty') != 'story'
                 and not p.data.get('assist_declined')):
@@ -1583,6 +1661,9 @@ class ResultsScreen(ListScreen):
             yy += 22
         if r['run_type'] == 'training':
             text(surf, 'Тренировка: награды не начисляются', 15, (180, 180, 200), (px + 16, yy))
+        if r.get('victory'):
+            text(surf, 'ПОБЕДА', 26, CFG.COLOR_SUCCESS, (px + 484, 112), 'right', True)
+        draw_damage_chart(surf, (px, 455, 500, 215), r)
         super_draw_list(self, surf)
 
 
@@ -1601,6 +1682,11 @@ def super_draw_list(screen: ListScreen, surf: pygame.Surface) -> None:
         text(surf, it.get_label(), 18, it.color or CFG.COLOR_TEXT, (rr.x + 12, rr.y + 7), bold=sel)
     desc = screen.items[screen.index].get_desc() if screen.items else ''
     if desc:
-        text_block(surf, desc, 15, (180, 190, 210), lr.right + 30, lr.y, 600)
+        text_block(surf, desc, 15, (180, 190, 210), lr.right + 20, lr.y, 160)
     if screen.message_t > 0:
         text(surf, screen.message, 18, CFG.COLOR_ACCENT, (CFG.SCREEN_WIDTH / 2, CFG.SCREEN_HEIGHT - 40), 'center', True)
+
+
+# Экраны 0.7.0 (дерево из 6 веток, сборки, магазин, победа, испытания, редактор волн, повтор)
+from .ui_ext import (BuildsScreen, ReplayScreen, ShopScreen, TrialsScreen, UpgradeTreeScreen,  # noqa: E402
+                     VictoryScreen, WaveEditorScreen, draw_damage_chart)

@@ -66,11 +66,15 @@ class SoundManager:
 
     def _ensure_assets(self) -> None:
         """При первом запуске из исходников создаёт WAV-файлы звукового дизайна."""
-        if any(os.path.isdir(d) and any(f.endswith('.wav') for f in os.listdir(d)) for d in sound_dirs()):
-            return
         try:
-            from .sound_design import generate_all
-            generate_all(USER_SOUND_DIR)
+            from .sound_design import RECIPES, generate_all
+            have = set()
+            for d in sound_dirs():
+                if os.path.isdir(d):
+                    have |= {os.path.splitext(f)[0] for f in os.listdir(d) if f.lower().endswith(('.wav', '.ogg'))}
+            missing = [n for n in RECIPES if n not in have]
+            if missing:  # 0.7.0: досоздаём только недостающие (новые звуки поверх старых паков)
+                generate_all(USER_SOUND_DIR, only=missing)
         except Exception as e:  # нет прав на запись/NumPy — останется ретро-синтез
             logger.warning(f"Sound asset generation skipped: {e}")
 
@@ -114,6 +118,10 @@ class SoundManager:
             'artifact': self._synth_arpeggio([440, 554, 659, 880], 70, 0.22),
             'achievement': self._synth_arpeggio([784, 988, 1175], 80, 0.22),
             'ui_move': s(900, 900, 25, 'sine', 0.1), 'ui_select': s(660, 990, 60, 'sine', 0.15),
+            'mode_violet': s(700, 980, 60, 'sine', 0.2), 'shoot_violet': s(1800, 900, 80, 'sine', 0.22),
+            'absorb': s(1600, 500, 120, 'sine', 0.22), 'overload': s(80, 320, 450, 'saw', 0.35),
+            'parry_touch': s(1500, 2400, 60, 'sine', 0.25), 'skill': self._synth_arpeggio([523, 659, 988], 50, 0.22),
+            'ability': s(120, 60, 350, 'saw', 0.3), 'portal': s(300, 1200, 200, 'sine', 0.22),
         })
         for name, f in (('melody_c', 262), ('melody_d', 294), ('melody_e', 330), ('melody_g', 392),
                         ('melody_a', 440), ('melody_eb', 311), ('melody_f', 349), ('melody_bb', 466)):

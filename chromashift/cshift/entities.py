@@ -5,12 +5,13 @@ from typing import Any, List, Optional, Tuple
 
 import pygame
 
-from .config import CFG, MODES
+from .config import ALL_MODES, CFG, MODES
+from .hires import get_scale, layer
 from .utils import (SurfaceCache, circle_collision, clamp, color_lerp, lerp,
                     mode_color, vec_distance, vec_length, vec_normalize, visual)
 from .fx import FloatingText
 
-MODE_SHAPES = {'RED': 'triangle', 'BLUE': 'square', 'GREEN': 'circle'}
+MODE_SHAPES = {'RED': 'triangle', 'BLUE': 'square', 'GREEN': 'circle', 'VIOLET': 'diamond'}
 
 
 def draw_shape(surface: pygame.Surface, shape: str, color: Tuple[int, int, int],
@@ -75,10 +76,17 @@ class Player:
         self.last_damage_source = ''
         self.ship_shape = 'circle'
         self.trail_style = 'mode'
+        self.color_lock_t = 0.0        # Диссонанс/волна «Один цвет»: смена цвета заблокирована
+        self.physics_map: dict = {}     # волна «Инверсия»: режим → чья физика используется
+        self.phase_t = 0.0              # VIOLET-навык «Фаза»: неосязаемость
+        self.speed_bonus = 1.0          # краска своего цвета и прочие временные бонусы
+        self.last_switch_time = -10.0
 
     # --- Режимы ---
     def set_mode(self, mode: str, game: Any) -> None:
-        if mode == self.mode or mode not in MODES:
+        if mode == self.mode or mode not in ALL_MODES:
+            return
+        if mode == 'VIOLET' and not getattr(self.mods, 'violet_unlocked', False):
             return
         self.mode = mode
         if mode == 'BLUE':
@@ -86,11 +94,13 @@ class Player:
             if self.mods.blue_shockwave and self.shockwave_cooldown <= 0:
                 self.shockwave_cooldown = 3.0
                 game.blue_shockwave(self.x, self.y)
-        game.sound_manager.play({'RED': 'mode_red', 'BLUE': 'mode_blue', 'GREEN': 'mode_green'}[mode], 0.4)
+        game.sound_manager.play({'RED': 'mode_red', 'BLUE': 'mode_blue', 'GREEN': 'mode_green',
+                                 'VIOLET': 'mode_violet'}[mode], 0.4)
 
     def mode_param(self, name: str) -> float:
-        base = CFG.get(f'{self.mode}_{name}')
-        mult = getattr(self.mods, f'{name.lower()}_mult')[self.mode]
+        phys = self.physics_map.get(self.mode, self.mode)  # «Инверсия» подменяет физику цвета
+        base = CFG.get(f'{phys}_{name}')
+        mult = getattr(self.mods, f'{name.lower()}_mult').get(self.mode, 1.0)
         return base * mult
 
     # --- Dash ---
@@ -128,6 +138,10 @@ class Player:
             self.dash_cooldown -= dt
         if self.shockwave_cooldown > 0:
             self.shockwave_cooldown -= dt
+        if self.color_lock_t > 0:
+            self.color_lock_t -= dt
+        if self.phase_t > 0:
+            self.phase_t -= dt
         if self.squash_timer > 0:
             self.squash_timer -= dt
             t = self.squash_timer / CFG.PLAYER_SQUASH_DURATION
@@ -173,6 +187,7 @@ class Player:
             max_speed = self.mode_param('MAX_SPEED')
             if self.in_resonance:
                 max_speed *= 1.0 + CFG.RESONANCE_SPEED_BOOST
+            max_speed *= self.speed_bonus
             if dx != 0 or dy != 0:
                 self.vx += dx * accel * dt
                 self.vy += dy * accel * dt
@@ -184,7 +199,7 @@ class Player:
             if speed > max_speed:
                 self.vx = (self.vx / speed) * max_speed
                 self.vy = (self.vy / speed) * max_speed
-            elif self.mode == 'GREEN' and speed > 10:
+            elif self.physics_map.get(self.mode, self.mode) == 'GREEN' and speed > 10:
                 drift = CFG.GREEN_LATERAL_DRIFT * self.mods.drift_mult * math.sin(game.game_time * 5)
                 perp_x, perp_y = -self.vy, self.vx
                 self.vx += perp_x * drift * dt * 60
@@ -203,13 +218,18 @@ class Player:
 
     # --- Стрельба ---
     def shoot(self, game: Any) -> bool:
-        if self.fire_cooldown > 0:
+        if self.fire_cooldown > 0 or self.phase_t > 0:
             return False
         self.fire_cooldown = CFG.FIRE_COOLDOWN / max(0.2, self.mods.fire_rate_mult)
         aim_x, aim_y = self.facing_x, self.facing_y
         base_angle = math.atan2(aim_y, aim_x)
         angles = [0.0]
-        dmg_mult = self.mods.damage_mult * self.mods.mode_damage_mult[self.mode]
+        dmg_mult = self.mods.damage_mult * self.mods.mode_damage_mult.get(self.mode, 1.0)
+        cm = getattr(game, 'color_mech', None)
+        if cm is not None:
+            dmg_mult *= cm.damage_bonus()
+        if self.mode == 'VIOLET':
+            dmg_mult *= 0.85
         if self.mode == 'BLUE' and self.mods.blue_split:
             angles = [-0.18, 0.0, 0.18]
             dmg_mult *= 0.6
@@ -226,11 +246,19 @@ class Player:
                                  bx, by, self.mode, self.impulse_active)
                 b.damage = CFG.BULLET_DAMAGE * dmg_mult
                 b.speed = CFG.BULLET_SPEED * self.mods.bullet_speed_mult
+                b.pierce_left = getattr(self.mods, 'bullet_pierce', 0) + (1 if self.mode == 'VIOLET' else 0)
+                b.bounces = getattr(self.mods, 'bullet_bounce', 0)
+                if getattr(self.mods, 'bullet_homing', False):
+                    b.homing = True
+                    b.homing_strength = 2.0
                 game.player_bullets.append(b)
+                if cm is not None:
+                    cm.decorate_bullet(b)
         game.on_player_shot(len(angles) * len(offsets))
 
         recoil = CFG.get(f'{self.mode}_RECOIL')
         max_speed = CFG.get(f'{self.mode}_MAX_SPEED')
+        game.screen_shake.trigger({'RED': 1.2, 'BLUE': 2.6, 'GREEN': 0.6, 'VIOLET': 0.9}[self.mode] * 0.6, 0.06)
         self.vx -= aim_x * max_speed * recoil
         self.vy -= aim_y * max_speed * recoil
         if self.mode == 'BLUE':
@@ -239,29 +267,42 @@ class Player:
         game.particles.emit_directional(
             self.x + aim_x * self.radius * 1.3, self.y + aim_y * self.radius * 1.3,
             CFG.SHOOT_PARTICLES, (aim_x, aim_y), 0.4, mode_color(self.mode), 350.0, 0.3, 2.0)
-        game.sound_manager.play({'RED': 'shoot_red', 'BLUE': 'shoot_blue', 'GREEN': 'shoot_green'}[self.mode], 0.5)
+        game.sound_manager.play({'RED': 'shoot_red', 'BLUE': 'shoot_blue', 'GREEN': 'shoot_green',
+                                 'VIOLET': 'shoot_violet'}[self.mode], 0.5)
         return True
 
     def blue_aoe_attack(self, game: Any) -> None:
         radius = CFG.BLUE_AOE_RADIUS * self.mods.blue_aoe_mult
         game.particles.emit_burst(self.x, self.y, 15, mode_color('BLUE'), 200.0, 0.5, 3.0)
         dmg_mult = self.mods.damage_mult * self.mods.mode_damage_mult['BLUE']
+        pull = getattr(self.mods, 'blue_gravity', False)
+        hits = 0
         for enemy in game.spatial_hash.query(self.x, self.y, radius + 50):
             if not getattr(enemy, 'alive', False) or not isinstance(enemy, Enemy):
                 continue
             if vec_distance(self.x, self.y, enemy.x, enemy.y) < radius + enemy.radius:
                 base = CFG.BULLET_DAMAGE if isinstance(enemy, DissonanceEnemy) else CFG.BULLET_DAMAGE * 0.5
+                if pull and not isinstance(enemy, BossEnemy):  # узел «Гравитационный якорь»: BLUE притягивает
+                    nx, ny = vec_normalize(self.x - enemy.x, self.y - enemy.y)
+                    enemy.vx += nx * 160
+                    enemy.vy += ny * 160
                 enemy.take_damage(base * dmg_mult, game, 'BLUE', is_aoe=True)
+                hits += 1
+        cm = getattr(game, 'color_mech', None)
+        if cm is not None and hits >= 3:
+            cm.trial_event('blue_multi')
 
     # --- Урон ---
     def can_be_damaged(self, game: Any) -> bool:
-        return not (self.invuln_timer > 0 or self.dash_invuln or game.god_mode or game.is_training)
+        return not (self.invuln_timer > 0 or self.dash_invuln or self.phase_t > 0 or game.god_mode or game.is_training)
 
     def take_damage(self, damage: float, game: Any, source_x: float, source_y: float,
                     source: str = 'неизвестно') -> bool:
         if not self.can_be_damaged(game):
             return False
         damage = max(1, int(round(damage * game.enemy_damage_mult)))
+        if getattr(self.mods, 'glass_mode', False):
+            damage = max(damage, 25)  # риск «Стекло»
         if self.shield_charges > 0:
             self.shield_charges -= 1
             self.invuln_timer = 0.6
@@ -304,6 +345,8 @@ class Player:
             trail_color = CFG.COLOR_ACCENT
         elif self.trail_style == 'rainbow':
             trail_color = mode_color(MODES[int(time * 6) % 3])
+        if self.phase_t > 0:
+            alpha = 90
         for x, y, ta in self.trail:
             size = int(self.radius * ta * 0.8)
             if size > 0:
@@ -318,7 +361,7 @@ class Player:
 
         shape = MODE_SHAPES[self.mode] if visual('shapes') else self.ship_shape
         if shape == 'circle':
-            body = pygame.Surface((rx * 2, ry * 2), pygame.SRCALPHA)
+            body = layer((rx * 2, ry * 2), pygame.SRCALPHA)
             pygame.draw.ellipse(body, (*color, alpha), (0, 0, rx * 2, ry * 2))
             surface.blit(body, (int(self.x - rx), int(self.y - ry)))
             pygame.draw.ellipse(surface, CFG.COLOR_PRIMARY, (int(self.x - rx), int(self.y - ry), rx * 2, ry * 2), 2)
@@ -336,6 +379,9 @@ class Player:
                             int(self.y + self.facing_y * (self.radius + 15))), 3)
         if self.shield_charges > 0:
             pygame.draw.circle(surface, CFG.COLOR_PRIMARY, (int(self.x), int(self.y)), self.radius + 7, 1)
+        if self.color_lock_t > 0:
+            pygame.draw.circle(surface, (150, 150, 160), (int(self.x), int(self.y)), self.radius + 11, 1)
+            draw_shape(surface, 'square', (150, 150, 160), self.x, self.y - self.radius - 16, 4, time * 4, 1)
         if self.impulse_active:
             pulse = 0.5 + 0.5 * math.sin(time * 10)
             pygame.draw.circle(surface, color_lerp(CFG.COLOR_BG, color, pulse),
@@ -360,16 +406,36 @@ class PlayerBullet:
         self.hit_enemies: List[int] = []
         self.ricochets = 0
         self.homing = False
+        self.homing_strength = 6.0
+        self.pierce_left = 0      # пробивание обычных пуль (узлы дерева, VIOLET)
+        self.bounces = 0          # отскоки от краёв арены (узел, волна «Зеркало»)
+        self.mix: Optional[str] = None  # смешанный выстрел двух цветов
+        self.crit = False
+        self.painted = False
+        self.slow_hit = False
 
     def update(self, dt: float, game: Any = None) -> bool:
         if self.homing and game is not None:
             target = game.nearest_enemy(self.x, self.y, 320, exclude=self.hit_enemies)
             if target is not None:
                 tx, ty = vec_normalize(target.x - self.x, target.y - self.y)
-                self.dx, self.dy = vec_normalize(lerp(self.dx, tx, min(1.0, dt * 6)),
-                                                 lerp(self.dy, ty, min(1.0, dt * 6)))
+                k = min(1.0, dt * self.homing_strength)
+                self.dx, self.dy = vec_normalize(lerp(self.dx, tx, k), lerp(self.dy, ty, k))
         self.x += self.dx * self.speed * dt
         self.y += self.dy * self.speed * dt
+        mirror = game is not None and getattr(getattr(game, 'director', None), 'special', None) == 'mirror'
+        if self.bounces > 0 or (mirror and not getattr(self, 'mirror_used', False)):
+            W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
+            bounced = False
+            if self.x < 0 or self.x > W:
+                self.dx, self.x, bounced = -self.dx, clamp(self.x, 0, W), True
+            if self.y < 0 or self.y > H:
+                self.dy, self.y, bounced = -self.dy, clamp(self.y, 0, H), True
+            if bounced:
+                if self.bounces > 0:
+                    self.bounces -= 1
+                else:
+                    self.mirror_used = True
         self.lifetime -= dt
         self.trail.append((self.x, self.y, 1.0))
         if len(self.trail) > 4:
@@ -397,7 +463,11 @@ class PlayerBullet:
             if size > 0:
                 ts = SurfaceCache.get_circle(size, color, int(120 * a))
                 surface.blit(ts, (int(x - size - 1), int(y - size - 1)))
-        r = self.radius * 1.5 if (self.is_piercing or self.is_refracted) else self.radius
+        r = self.radius * 1.5 if (self.is_piercing or self.is_refracted or self.mix) else self.radius
+        if self.mix:
+            pygame.draw.circle(surface, CFG.COLOR_ACCENT, (int(self.x), int(self.y)), int(r + 3), 1)
+        if self.crit:
+            pygame.draw.circle(surface, (255, 240, 150), (int(self.x), int(self.y)), int(r + 2), 1)
         if visual('shapes'):
             draw_shape(surface, MODE_SHAPES[self.mode], color, self.x, self.y, r + 1,
                        math.atan2(self.dy, self.dx))
@@ -410,7 +480,8 @@ class PlayerBullet:
 class EnemyBullet:
     def __init__(self, x: float, y: float, dx: float, dy: float,
                  speed: Optional[float] = None, damage: Optional[float] = None,
-                 source: str = 'пуля стрелка', radius: Optional[int] = None):
+                 source: str = 'пуля стрелка', radius: Optional[int] = None, color: Optional[str] = None):
+        self.color = color  # цветная пуля: поглощается, если игрок в том же цвете
         self.x = x
         self.y = y
         self.dx = dx
@@ -441,6 +512,14 @@ class EnemyBullet:
             if size > 0:
                 ts = SurfaceCache.get_circle(size, CFG.COLOR_DANGER, int(150 * a))
                 surface.blit(ts, (int(x - size - 1), int(y - size - 1)))
+        if self.color:
+            col = mode_color(self.color)
+            if visual('shapes'):
+                draw_shape(surface, MODE_SHAPES[self.color], col, self.x, self.y, self.radius + 2)
+            else:
+                pygame.draw.circle(surface, col, (int(self.x), int(self.y)), self.radius + 1)
+            pygame.draw.circle(surface, CFG.COLOR_PRIMARY, (int(self.x), int(self.y)), max(1, self.radius - 2))
+            return
         pygame.draw.circle(surface, CFG.COLOR_DANGER, (int(self.x), int(self.y)), self.radius)
         pygame.draw.circle(surface, CFG.COLOR_ACCENT, (int(self.x), int(self.y)), max(1, self.radius - 1))
 
@@ -451,10 +530,19 @@ ELITE_MODS = {
     'armored': ('Бронированный', (180, 190, 210)),
     'splitting': ('Расщепляющийся', (255, 140, 220)),
     'shielded': ('Цветной щит', (255, 255, 255)),
+    'vampire': ('Вампир', (200, 40, 60)),
+    'accelerator': ('Ускоритель', (120, 255, 255)),
+    'reflective': ('Отражающая аура', (220, 220, 255)),
 }
 ENEMY_NAMES = {
     'chaser': 'Преследователь', 'shooter': 'Стрелок', 'kamikaze': 'Камикадзе',
     'dissonance': 'Диссонанс', 'boss': 'Диссонанс-Прайм', 'dummy': 'Манекен', 'turret': 'Турель',
+}
+ENEMY_HINTS = {
+    'chaser': 'Бежит на вас и бьёт касанием. После удара отступает и перегруппировывается.',
+    'shooter': 'Держит дистанцию и стреляет. Смените цвет перед попаданием — Преломление.',
+    'kamikaze': 'Красный круг — зона взрыва. Рывок даёт неуязвимость.',
+    'dissonance': 'Броня цвета корпуса: бейте ДРУГИМ цветом. Его импульс глушит смену цвета. Отражённая пуля убивает сразу.',
 }
 
 
@@ -478,6 +566,18 @@ class Enemy:
         self.elite: List[str] = []
         self.vulnerable_mode: Optional[str] = None  # цветной щит: полный урон только от этого режима
         self.counted = True  # учитывается в прогрессе волны
+        self.color_tag: Optional[str] = None  # цвет врага (броня/слабость) — для цепных реакций и «точных» убийств
+        self.spawn_t = 0.35       # анимация появления
+        self.contact_damage = 0.0  # урон касанием (0 — по правилам класса)
+        self.aura_shield = False   # под щитом Щитоносца
+        self.aura_speed = 1.0      # аура Резонатора/Ускорителя
+        self.scatter_t = 0.0       # отряд потерял вожака
+        self.slow_t = 0.0          # морозный выстрел
+        self.stun_t = 0.0          # парирование касанием
+        self.retreat_t = 0.0       # отступление после удара
+        self.squad_id: Optional[int] = None
+        self.is_leader = False
+        self.absorbed = 0
 
     @property
     def name(self) -> str:
@@ -495,8 +595,10 @@ class Enemy:
         if 'fast' in mods:
             self.speed *= 1.4
         if 'armored' in mods:
-            self.hp *= 2.2
-            self.max_hp *= 2.2
+            # 0.7.0: меньше «губки» (было ×2.2 HP и −25% урона), зато бьёт больнее
+            self.hp *= 1.5
+            self.max_hp *= 1.5
+            self.damage_mult *= 1.25
         if 'shielded' in mods:
             self.vulnerable_mode = shield_mode or random.choice(MODES)
         self.radius *= 1.15
@@ -504,10 +606,37 @@ class Enemy:
     def damage_factor(self, bullet_mode: str) -> float:
         factor = 1.0
         if self.vulnerable_mode is not None and bullet_mode != self.vulnerable_mode:
-            factor *= 0.15
+            factor *= 0.5 if bullet_mode == 'VIOLET' else 0.15  # VIOLET — «фазовые» пули
         if 'armored' in self.elite:
-            factor *= 0.75
+            factor *= 0.85
+        if self.aura_shield:
+            factor *= 0.5
+        if self.scatter_t > 0:
+            factor *= 1.25
         return factor
+
+    def weakness(self) -> Optional[str]:
+        """Цвет, которым этого врага «правильно» убивать (для бонуса «ТОЧНО»)."""
+        return self.vulnerable_mode
+
+    def time_factor(self) -> float:
+        """Множитель хода времени врага: заморозка, оглушение, растерянность, ауры."""
+        if self.stun_t > 0:
+            return 0.0
+        k = self.aura_speed
+        if self.slow_t > 0:
+            k *= 0.5
+        if self.scatter_t > 0:
+            k *= 0.6
+        return k
+
+    def tick_status(self, dt: float) -> None:
+        for attr in ('spawn_t', 'scatter_t', 'slow_t', 'stun_t', 'retreat_t'):
+            v = getattr(self, attr)
+            if v > 0:
+                setattr(self, attr, max(0.0, v - dt))
+        self.aura_shield = False
+        self.aura_speed = 1.0
 
     def take_damage(self, damage: float, game: Any, bullet_mode: str, is_aoe: bool = False) -> bool:
         if not self.alive:
@@ -549,6 +678,29 @@ class Enemy:
                 a = time * 2 + i * 2.1
                 pygame.draw.circle(surface, c, (int(self.x + math.cos(a) * (self.radius + 10)),
                                                 int(self.y + math.sin(a) * (self.radius + 10))), 3)
+        if self.is_leader:
+            pts = [(self.x - 8, self.y - self.radius - 6), (self.x - 8, self.y - self.radius - 14),
+                   (self.x - 3, self.y - self.radius - 9), (self.x, self.y - self.radius - 16),
+                   (self.x + 3, self.y - self.radius - 9), (self.x + 8, self.y - self.radius - 14),
+                   (self.x + 8, self.y - self.radius - 6)]
+            pygame.draw.polygon(surface, CFG.COLOR_ACCENT, pts)
+        if self.aura_shield:
+            pygame.draw.circle(surface, (150, 200, 255), (int(self.x), int(self.y)), int(self.radius + 4), 1)
+        if self.slow_t > 0:
+            pygame.draw.circle(surface, (170, 230, 255), (int(self.x), int(self.y)), int(self.radius + 2), 2)
+        if self.stun_t > 0:
+            for k in range(3):
+                a = time * 6 + k * 2.1
+                pygame.draw.circle(surface, CFG.COLOR_ACCENT, (int(self.x + math.cos(a) * 10),
+                                                               int(self.y - self.radius - 8 + math.sin(a) * 3)), 2)
+        if self.color_tag and self.color_tag != self.vulnerable_mode:
+            # Иконка цвета врага (для доступности — форма вместо цвета)
+            col = mode_color(self.color_tag)
+            draw_shape(surface, MODE_SHAPES.get(self.color_tag, 'circle'), col, self.x + self.radius + 6,
+                       self.y - self.radius - 4, 4, 0, 0 if visual('shapes') else 1)
+        if self.spawn_t > 0:
+            k = self.spawn_t / 0.35
+            pygame.draw.circle(surface, CFG.COLOR_PRIMARY, (int(self.x), int(self.y)), int(self.radius + 30 * k), 1)
         if self.max_hp > 120 and self.hp < self.max_hp:
             w = int(self.radius * 2)
             t = clamp(self.hp / self.max_hp, 0, 1)
@@ -564,14 +716,20 @@ class ChaserEnemy(Enemy):
         self.speed = CFG.CHASER_SPEED
         self.wobble_phase = random.uniform(0, math.pi * 2)
         self.flank_direction = random.choice([-1, 1])
-    
+        self.contact_damage = float(CFG.CHASER_DAMAGE)
+
     def update(self, dt: float, player: Any) -> None:
         super().update(dt, player)
         self.wobble_phase += dt * 3
-        
+
         dx = player.x - self.x
         dy = player.y - self.y
         dist = vec_length(dx, dy)
+        if self.scatter_t > 0:  # отряд без вожака мечется
+            dx, dy = math.cos(self.wobble_phase * 1.7) * 100, math.sin(self.wobble_phase * 1.3) * 100
+            dist = 100.0
+        elif self.retreat_t > 0:  # после удара — отступает и перегруппировывается
+            dx, dy, dist = -dx, -dy, max(1.0, dist)
         
         if dist > 0.001:
             nx = dx / dist
@@ -778,7 +936,7 @@ class KamikazeEnemy(Enemy):
             warn_alpha = int(150 * (1 - warn_t))
             warn_radius = int(CFG.KAMIKAZE_WARN_RADIUS * (1 - warn_t * 0.3))
             
-            warn_surf = pygame.Surface((warn_radius * 2, warn_radius * 2), pygame.SRCALPHA)
+            warn_surf = layer((warn_radius * 2, warn_radius * 2), pygame.SRCALPHA)
             pygame.draw.circle(warn_surf, (*CFG.COLOR_DANGER, warn_alpha),
                                (warn_radius, warn_radius), warn_radius, 3)
             surface.blit(warn_surf, (int(self.x - warn_radius), int(self.y - warn_radius)))
@@ -801,6 +959,13 @@ class KamikazeEnemy(Enemy):
 
 # === ДИССОНАНС-ВРАГ ===
 class DissonanceEnemy(ChaserEnemy):
+    """Диссонанс 0.7.0: цветная броня вместо огромного запаса HP.
+
+    * Корпус окрашен в один из цветов и почти не получает урона пулями ЭТОГО цвета,
+      остальные цвета бьют в полную силу. Цвет брони меняется (мерцание перед сменой).
+    * Взрыв BLUE и отражённые пули по-прежнему работают (отражённая убивает сразу).
+    * Угроза: импульс «глушения» — внутри круга игрок не может сменить цвет.
+    """
     kind = 'dissonance'
 
     def __init__(self, x: float, y: float):
@@ -811,16 +976,37 @@ class DissonanceEnemy(ChaserEnemy):
         self.glitch_offset = 0.0
         self.glitch_phase = 0.0
         self.speed = CFG.DISSONANCE_SPEED
-    
+        self.contact_damage = float(CFG.DISSONANCE_DAMAGE)
+        self.color_tag = random.choice(MODES)
+        self.color_timer = CFG.DISSONANCE_COLOR_TIME * random.uniform(0.6, 1.0)
+        self.jam_timer = CFG.DISSONANCE_JAM_INTERVAL * random.uniform(0.5, 1.0)
+        self.jam_warn = 0.0
+        self.jam_flash = 0.0
+
+    def damage_factor(self, bullet_mode: str) -> float:
+        f = super().damage_factor(bullet_mode)
+        if bullet_mode == self.color_tag:
+            f *= CFG.DISSONANCE_ARMOR_MULT
+        elif bullet_mode == 'VIOLET':
+            f *= 0.6
+        return f
+
+    def weakness(self) -> Optional[str]:
+        return None  # любой цвет, кроме цвета брони
+
     def take_damage(self, damage: float, game: Any, bullet_mode: str, is_aoe: bool = False) -> bool:
         if not self.alive:
             return False
-        # Уязвим к AoE синего режима, остальной урон сильно ослаблен
-        mult = 1.0 if (is_aoe and bullet_mode == 'BLUE') else CFG.DISSONANCE_NORMAL_DAMAGE_MULT
+        mult = 1.0
+        if is_aoe and bullet_mode == 'BLUE':
+            mult = 1.0 / max(0.01, self.damage_factor('BLUE'))  # взрыв BLUE игнорирует броню
         self.hp -= damage * mult * self.damage_factor(bullet_mode)
         self.hit_flash = 0.1
         self.glitch_offset = random.uniform(-5, 5)
-        game.particles.emit_burst(self.x, self.y, 4, mode_color(bullet_mode), 150.0, 0.3, 2.0)
+        armored = bullet_mode == self.color_tag and not is_aoe
+        game.particles.emit_burst(self.x, self.y, 2 if armored else 5, mode_color(bullet_mode), 150.0, 0.3, 2.0)
+        if armored and random.random() < 0.15:
+            game.floating_texts.append(FloatingText(self.x, self.y - 24, 'БРОНЯ', (170, 170, 180), 0.5, 13))
         if self.hp <= 0:
             self.alive = False
             self.on_death(game, bullet_mode)
@@ -834,50 +1020,61 @@ class DissonanceEnemy(ChaserEnemy):
         self.alive = False
         game.particles.emit_burst(self.x, self.y, 30, CFG.COLOR_ACCENT, 400.0, 1.0, 4.0)
         game.particles.emit_spiral(self.x, self.y, 25, CFG.COLOR_PRIMARY, 300.0)
-        game.floating_texts.append(FloatingText(self.x, self.y, "DISSONANCE!", CFG.COLOR_ACCENT, 1.5, 24))
+        game.floating_texts.append(FloatingText(self.x, self.y, "ГАРМОНИЯ!", CFG.COLOR_ACCENT, 1.5, 24))
         game.sound_manager.play('refraction_perfect', 0.8)
         game.screen_shake.trigger(12.0, 0.3, (0, 0))
         game.on_enemy_killed(self, game.player.mode, refraction_kill=True)
 
-    def update(self, dt: float, player: Any) -> None:
+    def update(self, dt: float, player: Any) -> Any:
         super().update(dt, player)
         self.glitch_phase += dt * 15
         if random.random() < 0.1:
             self.glitch_offset = random.uniform(-3, 3)
         else:
             self.glitch_offset *= 0.9
-    
-    def draw(self, surface: pygame.Surface) -> None:
-        color = CFG.COLOR_DANGER if self.hit_flash <= 0 else CFG.COLOR_PRIMARY
-        
-        for offset in [-2, 0, 2]:
-            x = int(self.x + self.glitch_offset + offset)
-            y = int(self.y + offset)
-            
-            angle = math.atan2(self.vy, self.vx)
-            points = []
-            for i in range(3):
-                a = angle + i * (math.pi * 2 / 3)
-                px = x + math.cos(a) * self.radius
-                py = y + math.sin(a) * self.radius
-                points.append((px, py))
-            
-            alpha = 180 if offset == 0 else 80
-            glitch_surf = pygame.Surface((int(self.radius * 4), int(self.radius * 4)), pygame.SRCALPHA)
-            center_x = int(self.radius * 2)
-            center_y = int(self.radius * 2)
-            
-            adjusted_points = [(int(px - x + center_x), int(py - y + center_y)) for px, py in points]
-            pygame.draw.polygon(glitch_surf, (*color, alpha), adjusted_points)
-            
-            surface.blit(glitch_surf, (int(x - center_x), int(y - center_y)))
-        
-        if int(self.glitch_phase) % 3 == 0:
-            for _ in range(5):
-                noise_x = int(self.x + random.uniform(-self.radius, self.radius))
-                noise_y = int(self.y + random.uniform(-self.radius, self.radius))
-                pygame.draw.circle(surface, CFG.COLOR_PRIMARY, (noise_x, noise_y), 1)
+        self.color_timer -= dt
+        if self.color_timer <= 0:
+            self.color_tag = random.choice([m for m in MODES if m != self.color_tag])
+            self.color_timer = CFG.DISSONANCE_COLOR_TIME
+        if self.jam_flash > 0:
+            self.jam_flash -= dt
+        if self.jam_warn > 0:
+            self.jam_warn -= dt
+            if self.jam_warn <= 0:
+                self.jam_flash = 0.35
+                return ('jam', self.x, self.y, CFG.DISSONANCE_JAM_RADIUS)
+            return None
+        self.jam_timer -= dt
+        if self.jam_timer <= 0 and vec_distance(self.x, self.y, player.x, player.y) < CFG.DISSONANCE_JAM_RADIUS * 2.2:
+            self.jam_timer = CFG.DISSONANCE_JAM_INTERVAL
+            self.jam_warn = 0.7
+        return None
 
+    def draw(self, surface: pygame.Surface) -> None:
+        changing = self.color_timer < 0.6 and int(self.glitch_phase) % 2 == 0
+        base = mode_color(self.color_tag)
+        color = CFG.COLOR_PRIMARY if self.hit_flash > 0 else (color_lerp(base, CFG.COLOR_PRIMARY, 0.6) if changing else base)
+        angle = math.atan2(self.vy, self.vx)
+        for offset in (-2, 0, 2):
+            x = self.x + self.glitch_offset + offset
+            y = self.y + offset
+            pts = [(x + math.cos(angle + i * 2.0944) * self.radius, y + math.sin(angle + i * 2.0944) * self.radius)
+                   for i in range(3)]
+            if offset == 0:
+                pygame.draw.polygon(surface, color, pts)
+                pygame.draw.polygon(surface, CFG.COLOR_PRIMARY, pts, 2)
+            else:
+                pygame.draw.polygon(surface, color_lerp(CFG.COLOR_BG, color, 0.45), pts, 1)
+        pygame.draw.circle(surface, CFG.COLOR_DANGER, (int(self.x), int(self.y)), max(2, int(self.radius * 0.3)))
+        if visual('shapes'):
+            draw_shape(surface, MODE_SHAPES[self.color_tag], CFG.COLOR_PRIMARY, self.x, self.y - self.radius - 10, 4, 0, 1)
+        if self.jam_warn > 0:
+            k = 1 - self.jam_warn / 0.7
+            pygame.draw.circle(surface, (170, 170, 190), (int(self.x), int(self.y)),
+                               int(CFG.DISSONANCE_JAM_RADIUS * k), 2)
+            pygame.draw.circle(surface, (90, 90, 110), (int(self.x), int(self.y)), int(CFG.DISSONANCE_JAM_RADIUS), 1)
+        if self.jam_flash > 0:
+            pygame.draw.circle(surface, (210, 210, 230), (int(self.x), int(self.y)), int(CFG.DISSONANCE_JAM_RADIUS), 3)
 
 
 # === БОСС: ДИССОНАНС-ПРАЙМ (каждые 10 волн) ===

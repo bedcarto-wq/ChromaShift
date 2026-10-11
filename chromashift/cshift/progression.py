@@ -1,4 +1,4 @@
-"""Метагейм ChromaShift 0.6.5: модификаторы забега, дерево улучшений, корпуса и модули,
+"""Метагейм ChromaShift 0.7.0: модификаторы забега, дерево улучшений, корпуса и модули,
 артефакты, профили и сохранения, статистика, достижения, контракты, испытания."""
 import copy
 import datetime as _dt
@@ -9,11 +9,11 @@ import random
 import shutil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .config import CFG, MODES, GAME_VERSION, resolve_game_path
+from .config import ALL_MODES, CFG, MODES, GAME_VERSION, resolve_game_path
 
 logger = logging.getLogger('ChromaShift')
 
-SAVE_VERSION = 3
+SAVE_VERSION = 4
 PROFILE_SLOTS = 3
 BACKUP_COUNT = 3
 
@@ -35,7 +35,7 @@ class RunMods:
         self.max_hp_add = 0.0
         self.max_hp_mult = 1.0
         self.damage_mult = 1.0
-        self.mode_damage_mult = {m: 1.0 for m in MODES}
+        self.mode_damage_mult = {m: 1.0 for m in ALL_MODES}
         self.fire_rate_mult = 1.0
         self.bullet_speed_mult = 1.0
         self.dash_cd_mult = 1.0
@@ -55,9 +55,9 @@ class RunMods:
         self.impulse_duration_add = 0.0
         self.beat_window_add = 0.0
         self.beat_groove = False
-        self.accel_mult = {m: 1.0 for m in MODES}
-        self.max_speed_mult = {m: 1.0 for m in MODES}
-        self.decel_mult = {m: 1.0 for m in MODES}
+        self.accel_mult = {m: 1.0 for m in ALL_MODES}
+        self.max_speed_mult = {m: 1.0 for m in ALL_MODES}
+        self.decel_mult = {m: 1.0 for m in ALL_MODES}
         self.drift_mult = 1.0
         self.blue_aoe_mult = 1.0
         self.red_dash_trail = False
@@ -81,6 +81,33 @@ class RunMods:
         self.budget_mult = 1.0
         self.telegraph_add = 0.0
         self.elite_chance_add = 0.0
+        # --- 0.7.0 ---
+        self.violet_unlocked = False
+        self.bullet_pierce = 0
+        self.bullet_bounce = 0
+        self.bullet_homing = False
+        self.blue_gravity = False
+        self.crit_add = 0.0
+        self.crit_mult_add = 0.0
+        self.overload_duration_add = 0.0
+        self.overload_gain_mult = 1.0
+        self.paint_chance_add = 0.0
+        self.paint_radius_mult = 1.0
+        self.chain_damage_mult = 1.0
+        self.precise_mult = 1.5
+        self.parry_touch_window_add = 0.0
+        self.mix_cd_mult = 1.0
+        self.skill_cd_mult = 1.0
+        self.ability_cd_mult = 1.0
+        self.phase_duration_add = 0.0
+        self.shards_mult = 1.0
+        self.boss_damage_mult = 1.0
+        self.heal_on_kills = 0          # мастерство: +1 HP за каждые N убийств (0 — выкл.)
+        self.swarm_mult = 1.0           # риск «Рой»/правила дня
+        self.unstable_colors = False    # риск «Нестабильность»
+        self.glass_mode = False         # риск «Стекло»
+        self.always_dark = False        # риск «Затмение»
+        self.wave_effects: List[Tuple[int, str, int]] = []  # узлы «от волны N»
         self.sources: List[str] = []  # что сформировало модификаторы (для экрана итогов)
 
     # Производные значения
@@ -101,12 +128,13 @@ class RunMods:
         return max(1, CFG.ECHO_REFRACTION_THRESHOLD + self.echo_threshold_add)
 
     def all_speed(self, mult: float) -> None:
-        for m in MODES:
+        for m in ALL_MODES:
             self.max_speed_mult[m] *= mult
             self.accel_mult[m] *= mult
 
     def to_dict(self) -> Dict[str, Any]:
-        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in self.__dict__.items() if k != 'sources'}
+        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in self.__dict__.items()
+                if k not in ('sources', 'wave_effects')}
 
 
 # =====================================================================
@@ -117,15 +145,25 @@ BRANCHES = {
     'RED': ('Импульс', None),
     'BLUE': ('Якорь', None),
     'GREEN': ('Поток', None),
+    'VIOLET': ('Фаза', None),
+    'MASTER': ('Мастерство', (255, 210, 120)),
 }
 
 
 def _node(name: str, branch: str, costs: List[int], desc: str, effect: Callable[[RunMods, int], None],
           row: int, requires: Optional[List[str]] = None, tier_cp: int = 0, key: bool = False,
-          group: Optional[str] = None, tradeoff: bool = False, legacy: Optional[str] = None) -> Dict[str, Any]:
-    return {'name': name, 'branch': branch, 'costs': costs, 'max': len(costs), 'desc': desc,
-            'effect': effect, 'row': row, 'requires': requires or [], 'tier_cp': tier_cp, 'key': key,
-            'group': group, 'tradeoff': tradeoff, 'legacy': legacy}
+          group: Optional[str] = None, tradeoff: bool = False, legacy: Optional[str] = None,
+          **extra: Any) -> Dict[str, Any]:
+    d = {'name': name, 'branch': branch, 'costs': costs, 'max': len(costs), 'desc': desc,
+         'effect': effect, 'row': row, 'requires': requires or [], 'tier_cp': tier_cp, 'key': key,
+         'group': group, 'tradeoff': tradeoff, 'legacy': legacy,
+         # 0.7.0: requires_any — хватит одного из узлов (мосты между ветками); hidden — скрытый узел
+         # (функция профиля → открыт ли); hull — работает только с корпусом; toggle — можно выключать;
+         # from_wave — эффект включается с волны N; grow — растёт от статистики; evolve — эволюция
+         'requires_any': [], 'hidden': None, 'hidden_hint': '', 'hull': None, 'toggle': False,
+         'from_wave': 0, 'grow': None, 'evolve': None, 'total_cp': 0, 'kind': 'normal'}
+    d.update(extra)
+    return d
 
 
 def _m(attr: str, mode: str, per: float) -> Callable[[RunMods, int], None]:
@@ -236,6 +274,101 @@ UPGRADES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _set(attr: str, value: Any) -> Callable[[RunMods, int], None]:
+    def f(m: RunMods, lvl: int) -> None:
+        if lvl > 0:
+            setattr(m, attr, value)
+    return f
+
+
+def _stat(key: str) -> Callable[[Dict[str, Any]], float]:
+    return lambda data: float(data['stats'].get(key, 0) or 0)
+
+
+UPGRADES.update({
+    # --- VIOLET: фаза (новый, четвёртый цвет) ---
+    'violet_root': _node('Фиолетовый спектр', 'VIOLET', [120], 'Открывает 4-й цвет VIOLET (клавиша 4): '
+                         'быстрый, скользкий, пули пробивают 1 врага и бьют по цветным щитам на 50%',
+                         _set('violet_unlocked', True), 0, total_cp=150, key=True, kind='root'),
+    'violet_power': _node('Аметистовая мощь', 'VIOLET', [30, 50, 80], '+10% урона в VIOLET за уровень',
+                          _m('mode_damage_mult', 'VIOLET', 0.10), 1, requires=['violet_root']),
+    'violet_glide': _node('Скольжение', 'VIOLET', [30, 50], '+6% скорости и +8% ускорения VIOLET',
+                          _multi(_m('max_speed_mult', 'VIOLET', 0.06), _m('accel_mult', 'VIOLET', 0.08)), 2,
+                          requires=['violet_root']),
+    'violet_phase': _node('Долгая фаза', 'VIOLET', [50, 90], '+0.3 с навыка «Фаза» (R в VIOLET)',
+                          _add('phase_duration_add', 0.3), 3, requires=['violet_power']),
+    'violet_drill': _node('Сверло', 'VIOLET', [140], 'Все пули пробивают ещё 1 врага (ключевой)',
+                          _add('bullet_pierce', 1), 4, requires=['violet_root'], tier_cp=150, key=True,
+                          group='violet_key'),
+    'violet_bounce': _node('Призменный отскок', 'VIOLET', [140], 'Пули 1 раз отскакивают от стен (ключевой)',
+                           _add('bullet_bounce', 1), 4, requires=['violet_root'], tier_cp=150, key=True,
+                           group='violet_key'),
+    'violet_seek': _node('Тяга спектра', 'VIOLET', [110], 'Компромисс: пули слегка наводятся, −10% урона',
+                         _multi(_flag('bullet_homing'), _mul('damage_mult', 0.9)), 5, requires=['violet_root'],
+                         tier_cp=250, tradeoff=True),
+    # --- Новые узлы старых веток ---
+    'core_crit': _node('Точка разлома', 'CORE', [40, 70, 110], '+3% шанс крита за уровень (крит ×2)',
+                       _add('crit_add', 0.03), 6, tier_cp=250),
+    'core_shards': _node('Сборщик осколков', 'CORE', [35, 60], '+25% осколков для магазина забега',
+                         _add('shards_mult', 0.25), 6, tier_cp=120),
+    'red_overload': _node('Ядерная перегрузка', 'RED', [50, 90], '+1 с к режиму Перегрузки',
+                          _add('overload_duration_add', 1.0), 6, tier_cp=200),
+    'blue_gravity': _node('Гравитационный якорь', 'BLUE', [130], 'Выстрел BLUE притягивает врагов к вам',
+                          _flag('blue_gravity'), 6, tier_cp=250, key=True),
+    'green_paint': _node('Палитра', 'GREEN', [40, 70], '+6% шанс краски при убийстве, +20% её радиус',
+                         _multi(_add('paint_chance_add', 0.06), _add('paint_radius_mult', 0.2)), 6, tier_cp=150),
+    # --- МАСТЕРСТВО: мосты, скрытые, корпусные, переключаемые, растущие, эволюция ---
+    'x_magma': _node('Мост: Магма', 'MASTER', [90], 'RED + BLUE: цепные реакции бьют на 50% сильнее',
+                     _mul('chain_damage_mult', 1.5), 0, requires=['red_power', 'blue_power'], kind='bridge'),
+    'x_tide': _node('Мост: Прилив', 'MASTER', [90], 'BLUE + GREEN: окно парирования касанием +0.08 с',
+                    _add('parry_touch_window_add', 0.08), 0, requires=['blue_power', 'green_power'], kind='bridge'),
+    'x_storm': _node('Мост: Шторм', 'MASTER', [90], 'GREEN + RED: смешанные выстрелы перезаряжаются на 40% быстрее',
+                     _mul('mix_cd_mult', 0.6), 0, requires=['green_power', 'red_power'], kind='bridge'),
+    'x_prism': _node('Мост: Призма', 'MASTER', [120], 'Ядро + любая ветка VIOLET: перегрузка копится на 30% быстрее',
+                     _mul('overload_gain_mult', 1.3), 1, requires=['core_hp'], requires_any=['violet_power', 'violet_glide'],
+                     kind='bridge'),
+    'm_red': _node('Мастер RED', 'MASTER', [200, 300], 'Мастерство (1 из 3): +12% урона RED, лечение 1 HP за 12 убийств',
+                   _multi(_m('mode_damage_mult', 'RED', 0.12), _set('heal_on_kills', 12)), 2, group='mastery',
+                   total_cp=800, kind='mastery'),
+    'm_blue': _node('Мастер BLUE', 'MASTER', [200, 300], 'Мастерство (1 из 3): +25% радиус волны BLUE, +1 щит',
+                    _multi(_add('blue_aoe_mult', 0.25), _add('shield_charges', 1)), 2, group='mastery',
+                    total_cp=800, kind='mastery'),
+    'm_green': _node('Мастер GREEN', 'MASTER', [200, 300], 'Мастерство (1 из 3): −15% перезарядки рывка и навыков',
+                     _multi(_mul('dash_cd_mult', 0.85), _mul('skill_cd_mult', 0.85)), 2, group='mastery',
+                     total_cp=800, kind='mastery'),
+    'h_prime': _node('Сердце Прайма', 'MASTER', [150], 'Скрытый: +15% урона по боссам',
+                     _mul('boss_damage_mult', 1.15), 3, hidden=lambda d: d['stats'].get('bosses', 0) >= 1,
+                     hidden_hint='Победите любого босса', kind='hidden'),
+    'h_mirror': _node('Зеркальная душа', 'MASTER', [150], 'Скрытый: +0.03 с к окну Преломления и Эхо +1 с',
+                      _multi(_add('refraction_window_add', 0.03), _add('echo_duration_add', 1.0)), 3,
+                      hidden=lambda d: d['stats'].get('refractions', 0) >= 150,
+                      hidden_hint='Совершите 150 Преломлений', kind='hidden'),
+    'h_swarm': _node('Жнец роя', 'MASTER', [120], 'Скрытый: цепные реакции от роя, +10% урона',
+                     _mul('damage_mult', 1.1), 3, hidden=lambda d: d['stats']['codex'].get('swarm', 0) >= 300,
+                     hidden_hint='Уничтожьте 300 врагов «Рой»', kind='hidden'),
+    'hull_needle': _node('Заточка Иглы', 'MASTER', [80], 'Только с корпусом «Игла»: +12% урона',
+                         _mul('damage_mult', 1.12), 4, hull='needle', kind='hull'),
+    'hull_bastion': _node('Плиты Бастиона', 'MASTER', [80], 'Только с «Бастионом»: +20 HP, +10% волна BLUE',
+                          _multi(_add('max_hp_add', 20), _add('blue_aoe_mult', 0.1)), 4, hull='bastion', kind='hull'),
+    'hull_painter': _node('Кисть Художника', 'MASTER', [80], 'Только с «Художником»: краска бьёт врагов внутри',
+                          _add('paint_radius_mult', 0.3), 4, hull='painter', kind='hull'),
+    't_glass': _node('Хрупкий разгон', 'MASTER', [100], 'Переключаемый: +20% урона, но −20% HP (можно выключить)',
+                     _multi(_mul('damage_mult', 1.2), _mul('max_hp_mult', 0.8)), 5, toggle=True, tradeoff=True,
+                     kind='toggle'),
+    'w_second_wind': _node('Второе дыхание', 'MASTER', [120], 'С 10-й волны забега: +15% урона и +10% скорости',
+                           _multi(_mul('damage_mult', 1.15), lambda m, l: m.all_speed(1.1) if l else None), 5,
+                           from_wave=10, kind='wave'),
+    'g_veteran': _node('Ветеран', 'MASTER', [100], 'Растущий: +1% урона за каждые 500 убийств (макс. +10%)',
+                       lambda m, l: None, 6, grow=('kills', 500, 0.01, 0.10), kind='grow'),
+    'e_core': _node('Живой сплав', 'MASTER', [150, 200], '+10 HP за уровень. Эволюция: 3 победы над боссами — '
+                    'ещё +1 щит', _add('max_hp_add', 10), 6,
+                    evolve={'stat': 'bosses', 'goal': 3, 'name': 'Живой сплав II', 'effect': _add('shield_charges', 1)},
+                    kind='evolve'),
+})
+NEW_IN_070 = {nid for nid in UPGRADES if nid.startswith(('violet_', 'x_', 'm_', 'h_', 'hull_', 't_', 'w_', 'g_', 'e_'))
+              or nid in ('core_crit', 'core_shards', 'red_overload', 'blue_gravity', 'green_paint')}
+
+
 def branch_spent(upgrades: Dict[str, int], branch: str) -> int:
     total = 0
     for nid, lvl in upgrades.items():
@@ -245,26 +378,66 @@ def branch_spent(upgrades: Dict[str, int], branch: str) -> int:
     return total
 
 
-def node_status(profile: 'Profile', nid: str) -> Tuple[str, str]:
-    """Возвращает (статус, причина): maxed / locked / blocked / expensive / available."""
+def total_spent(upgrades: Dict[str, int]) -> int:
+    return sum(branch_spent(upgrades, b) for b in BRANCHES)
+
+
+def node_of_week(d: Optional[_dt.date] = None) -> str:
+    """Узел недели: −30% цены (одинаковый у всех игроков)."""
+    pool = sorted(nid for nid, n in UPGRADES.items() if n['kind'] in ('normal', 'bridge') and not n['key'])
+    rng = random.Random(challenge_seed('weekly', d) + 17)
+    return rng.choice(pool)
+
+
+def node_cost(profile: 'Profile', nid: str, lvl: Optional[int] = None) -> int:
+    """Нелинейная цена: базовая × (1 + 1% за каждый купленный уровень, не больше +40%), узел недели −30%."""
     node = UPGRADES[nid]
-    lvl = profile.data['upgrades'].get(nid, 0)
+    lvl = profile.data['upgrades'].get(nid, 0) if lvl is None else lvl
+    base = node['costs'][min(lvl, node['max'] - 1)]
+    levels = sum(profile.data['upgrades'].values())
+    k = 1.0 + min(0.4, 0.01 * levels)
+    if nid == node_of_week():
+        k *= 0.7
+    return max(1, int(round(base * k)))
+
+
+def node_visible(profile: 'Profile', nid: str) -> bool:
+    h = UPGRADES[nid].get('hidden')
+    if h is None or profile.data['upgrades'].get(nid, 0) > 0:
+        return True
+    try:
+        return bool(h(profile.data))
+    except (KeyError, TypeError):
+        return False
+
+
+def node_status(profile: 'Profile', nid: str) -> Tuple[str, str]:
+    """Возвращает (статус, причина): maxed / hidden / locked / blocked / expensive / available."""
+    node = UPGRADES[nid]
+    ups = profile.data['upgrades']
+    lvl = ups.get(nid, 0)
     if lvl >= node['max']:
         return 'maxed', 'Максимальный уровень'
-    spent = branch_spent(profile.data['upgrades'], node['branch'])
+    if not node_visible(profile, nid):
+        return 'hidden', 'Скрытый узел: ' + (node.get('hidden_hint') or 'условие неизвестно')
+    spent = branch_spent(ups, node['branch'])
     if spent < node['tier_cp']:
         return 'locked', f"Вложите в ветку ещё {node['tier_cp'] - spent} CP"
+    if node.get('total_cp') and total_spent(ups) < node['total_cp']:
+        return 'locked', f"Вложите в дерево всего ещё {node['total_cp'] - total_spent(ups)} CP"
     for req in node['requires']:
-        if profile.data['upgrades'].get(req, 0) <= 0:
+        if ups.get(req, 0) <= 0:
             return 'locked', f"Нужно: {UPGRADES[req]['name']}"
+    if node.get('requires_any') and not any(ups.get(r, 0) > 0 for r in node['requires_any']):
+        return 'locked', 'Нужно одно из: ' + ', '.join(UPGRADES[r]['name'] for r in node['requires_any'])
     if node['group']:
         for other, onode in UPGRADES.items():
-            if other != nid and onode['group'] == node['group'] and profile.data['upgrades'].get(other, 0) > 0:
+            if other != nid and onode['group'] == node['group'] and ups.get(other, 0) > 0:
                 return 'blocked', f"Взаимоисключает: {onode['name']}"
-    cost = node['costs'][lvl]
+    cost = node_cost(profile, nid)
     if profile.cp < cost:
         return 'expensive', f"Нужно {cost} CP"
-    return 'available', f"Цена: {cost} CP"
+    return 'available', f"Цена: {cost} CP" + (' (узел недели −30%)' if nid == node_of_week() else '')
 
 
 def preview_node(profile: 'Profile', nid: str) -> List[str]:
@@ -275,9 +448,40 @@ def preview_node(profile: 'Profile', nid: str) -> List[str]:
     after = RunMods()
     node['effect'](before, lvl)
     node['effect'](after, min(node['max'], lvl + 1))
-    lines = []
-    b, a = before.to_dict(), after.to_dict()
-    labels = {'max_hp_add': 'Макс. HP', 'max_hp_mult': 'Множ. HP', 'damage_mult': 'Урон',
+    lines = diff_mods(before, after)
+    if node.get('from_wave'):
+        lines.append(f"Действует с волны {node['from_wave']}")
+    if node.get('hull'):
+        lines.append(f"Только с корпусом «{HULLS.get(node['hull'], {}).get('name', node['hull'])}»")
+    if node.get('grow'):
+        stat, per, step, cap = node['grow']
+        cur = min(cap, step * int(profile.data['stats'].get(stat, 0) // per))
+        lines.append(f"Сейчас: +{cur * 100:.0f}% урона (до +{cap * 100:.0f}%)")
+    if node.get('evolve'):
+        ev = node['evolve']
+        lines.append(f"Эволюция «{ev['name']}»: {profile.data['stats'].get(ev['stat'], 0)}/{ev['goal']}")
+    return lines or ['Без численных изменений']
+
+
+PRESTIGE_SPENT = 3000
+PRESTIGE_CP_BONUS = 0.05
+
+# Кап бонусов: чтобы стопка улучшений и артефактов не ломала игру
+MOD_CAPS = {'damage_mult': (0.3, 3.0), 'fire_rate_mult': (0.4, 2.2), 'dash_cd_mult': (0.4, 2.0),
+            'crit_add': (0.0, 0.35), 'pickup_radius_mult': (0.5, 3.0), 'powerup_chance_add': (0.0, 0.25),
+            'refraction_window_add': (-0.1, 0.25), 'bullet_pierce': (0, 3), 'bullet_bounce': (0, 2),
+            'shield_charges': (0, 5), 'revives': (0, 3)}
+
+
+def apply_caps(m: RunMods) -> None:
+    for k, (lo, hi) in MOD_CAPS.items():
+        v = getattr(m, k)
+        setattr(m, k, type(v)(max(lo, min(hi, v))))
+    for mode in ALL_MODES:
+        m.mode_damage_mult[mode] = max(0.3, min(2.5, m.mode_damage_mult[mode]))
+
+
+MOD_LABELS = {'max_hp_add': 'Макс. HP', 'max_hp_mult': 'Множ. HP', 'damage_mult': 'Урон',
               'dash_cd_mult': 'Перезарядка рывка', 'refraction_window_add': 'Окно Преломления',
               'pickup_radius_mult': 'Радиус подбора', 'powerup_chance_add': 'Шанс бонуса',
               'fire_rate_mult': 'Скорострельность', 'invuln_time_mult': 'Неуязвимость',
@@ -285,21 +489,52 @@ def preview_node(profile: 'Profile', nid: str) -> List[str]:
               'blue_aoe_mult': 'Радиус волны', 'resonance_radius_mult': 'Радиус Резонанса',
               'resonance_lifetime_add': 'Жизнь Резонанса', 'beat_window_add': 'Окно такта',
               'echo_duration_add': 'Длит. Эха', 'drift_mult': 'Дрейф', 'shield_charges': 'Щиты',
-              'revives': 'Воскрешения', 'refraction_ricochet': 'Рикошеты', 'dash_speed_mult': 'Скорость рывка'}
-    for k, v in a.items():
+              'revives': 'Воскрешения', 'refraction_ricochet': 'Рикошеты', 'dash_speed_mult': 'Скорость рывка',
+              'crit_add': 'Шанс крита', 'bullet_pierce': 'Пробивание', 'bullet_bounce': 'Отскоки',
+              'violet_unlocked': 'Цвет VIOLET', 'shards_mult': 'Осколки', 'paint_chance_add': 'Шанс краски',
+              'chain_damage_mult': 'Цепные реакции', 'overload_gain_mult': 'Набор перегрузки',
+              'boss_damage_mult': 'Урон по боссам', 'skill_cd_mult': 'Перезарядка навыков',
+              'mix_cd_mult': 'Перезарядка смешивания', 'phase_duration_add': 'Длит. фазы',
+              'overload_duration_add': 'Длит. перегрузки', 'parry_touch_window_add': 'Окно парирования',
+              'cp_mult': 'Множитель CP', 'enemy_damage_mult': 'Урон врагов', 'enemy_hp_mult': 'HP врагов'}
+
+
+def diff_mods(a: RunMods, b: RunMods) -> List[str]:
+    """Человекочитаемая разница модификаторов a → b (для предпросмотра, сборок и артефактов)."""
+    lines = []
+    da, db = a.to_dict(), b.to_dict()
+    for k, v in db.items():
         if isinstance(v, dict):
             for mode, val in v.items():
-                if abs(val - b[k][mode]) > 1e-9:
-                    lines.append(f"{k.replace('_mult', '').replace('_', ' ')} {mode}: ×{b[k][mode]:.2f} → ×{val:.2f}")
-        elif v != b[k]:
-            name = labels.get(k, k)
+                if abs(val - da[k].get(mode, 1.0)) > 1e-9:
+                    lines.append(f"{k.replace('_mult', '').replace('_', ' ')} {mode}: ×{da[k].get(mode, 1.0):.2f} → ×{val:.2f}")
+        elif v != da[k]:
+            name = MOD_LABELS.get(k, k)
             if isinstance(v, bool):
-                lines.append(f"{name}: включается")
-            elif isinstance(v, float) and ('mult' in k):
-                lines.append(f"{name}: ×{b[k]:.2f} → ×{v:.2f}")
-            else:
-                lines.append(f"{name}: {b[k]:g} → {v:g}")
-    return lines or ['Без численных изменений']
+                lines.append(f"{name}: {'включается' if v else 'выключается'}")
+            elif isinstance(v, float) and 'mult' in k:
+                lines.append(f"{name}: ×{da[k]:.2f} → ×{v:.2f}")
+            elif isinstance(v, (int, float)):
+                lines.append(f"{name}: {da[k]:g} → {v:g}")
+    return lines
+
+
+BUILD_PRESETS: Dict[str, Dict[str, Any]] = {
+    'assault': {'name': 'Штурмовик', 'desc': 'RED, урон и Импульс',
+                'upgrades': {'core_hp': 2, 'red_power': 3, 'red_thrust': 2, 'red_impulse': 2, 'red_trail': 1,
+                             'core_crit': 2, 'red_chain': 1}},
+    'control': {'name': 'Контролёр', 'desc': 'BLUE, волна и щиты',
+                'upgrades': {'core_hp': 3, 'blue_power': 3, 'blue_aoe': 3, 'blue_anchor': 2, 'blue_shock': 1,
+                             'core_shield': 1}},
+    'dancer': {'name': 'Танцор', 'desc': 'GREEN, рывки и ритм',
+               'upgrades': {'core_dash': 3, 'green_power': 2, 'green_flow': 3, 'green_groove': 2, 'green_echo': 1}},
+    'parry': {'name': 'Преломитель', 'desc': 'Окно Преломления и отражённые пули',
+              'upgrades': {'core_lens': 3, 'core_prism': 1, 'green_power': 1, 'green_flow': 1, 'green_groove': 2,
+                           'green_homing': 1}},
+    'phase': {'name': 'Фазовый', 'desc': 'Открытие VIOLET и пробивание',
+              'upgrades': {'core_hp': 3, 'core_dash': 2, 'core_magnet': 2, 'violet_root': 1, 'violet_power': 2,
+                           'violet_glide': 1}},
+}
 
 
 # =====================================================================
@@ -316,6 +551,29 @@ HULLS: Dict[str, Dict[str, Any]] = {
                 'cost': 200, 'prisms': 2, 'shape': 'hex',
                 'apply': lambda m: (setattr(m, 'max_hp_mult', m.max_hp_mult * 1.3), m.all_speed(0.9),
                                     setattr(m, 'shield_charges', m.shield_charges + 1))},
+}
+
+HULLS.update({
+    'tank': {'name': 'Танк', 'desc': '+60% HP, −20% скорости, +20% волна BLUE, 4 слота', 'slots': 4, 'energy': 6,
+             'cost': 260, 'prisms': 2, 'shape': 'hex',
+             'apply': lambda m: (setattr(m, 'max_hp_mult', m.max_hp_mult * 1.6), m.all_speed(0.8),
+                                 setattr(m, 'blue_aoe_mult', m.blue_aoe_mult * 1.2))},
+    'ghost': {'name': 'Призрак', 'desc': '−30% HP, VIOLET открыт сразу, −30% перезарядки навыков', 'slots': 3,
+              'energy': 5, 'cost': 240, 'prisms': 2, 'shape': 'diamond',
+              'apply': lambda m: (setattr(m, 'max_hp_mult', m.max_hp_mult * 0.7), setattr(m, 'violet_unlocked', True),
+                                  setattr(m, 'skill_cd_mult', m.skill_cd_mult * 0.7))},
+    'painter': {'name': 'Художник', 'desc': '+15% шанс краски, краска шире на 40%, +10% урона в своей краске',
+                'slots': 3, 'energy': 6, 'cost': 220, 'prisms': 1, 'shape': 'circle',
+                'apply': lambda m: (setattr(m, 'paint_chance_add', m.paint_chance_add + 0.15),
+                                    setattr(m, 'paint_radius_mult', m.paint_radius_mult * 1.4))},
+})
+HULL_CHALLENGES = {
+    'prism': ('Дойдите до волны 15', 'best_wave', 15),
+    'needle': ('Пройдите 5 волн без урона за забег', 'no_damage_waves', 5),
+    'bastion': ('Победите босса', 'bosses', 1),
+    'tank': ('Дойдите до волны 20', 'best_wave', 20),
+    'ghost': ('Сделайте 300 убийств в VIOLET', 'kills_VIOLET', 300),
+    'painter': ('Дойдите до волны 12', 'best_wave', 12),
 }
 
 MODULES: Dict[str, Dict[str, Any]] = {
@@ -442,6 +700,63 @@ ARTIFACTS: Dict[str, Dict[str, Any]] = {
 }
 
 
+ARTIFACTS.update({
+    # Легендарные: редкие и мощные
+    'spectrum_heart': {'name': 'Сердце спектра', 'desc': '+25% урона всеми цветами, +1 щит', 'arch': 'any',
+                       'rarity': 'legendary', 'unique': True, 'weight': 0.25,
+                       'apply': lambda m: (setattr(m, 'damage_mult', m.damage_mult * 1.25),
+                                           setattr(m, 'shield_charges', m.shield_charges + 1))},
+    'violet_key': {'name': 'Аметистовый ключ', 'desc': 'Открывает VIOLET на этот забег, +10% урона VIOLET',
+                   'arch': 'any', 'rarity': 'legendary', 'unique': True, 'weight': 0.3,
+                   'apply': lambda m: (setattr(m, 'violet_unlocked', True),
+                                       m.mode_damage_mult.__setitem__('VIOLET', m.mode_damage_mult['VIOLET'] * 1.1))},
+    'drill_core': {'name': 'Буровое ядро', 'desc': 'Все пули пробивают +1 врага', 'arch': 'assault',
+                   'rarity': 'legendary', 'unique': True, 'weight': 0.3,
+                   'apply': lambda m: setattr(m, 'bullet_pierce', m.bullet_pierce + 1)},
+    # Проклятые: сильный плюс и ощутимый минус
+    'blood_prism': {'name': 'Кровавая призма', 'desc': 'Проклятый: +45% урона, но лечение отключено', 'arch': 'assault',
+                    'rarity': 'cursed', 'unique': True, 'weight': 0.4,
+                    'apply': lambda m: (setattr(m, 'damage_mult', m.damage_mult * 1.45), setattr(m, 'no_heal', True))},
+    'void_lens': {'name': 'Линза пустоты', 'desc': 'Проклятый: +0.06 с окна Преломления, враги +20% HP',
+                  'arch': 'parry', 'rarity': 'cursed', 'unique': True, 'weight': 0.4,
+                  'apply': lambda m: (setattr(m, 'refraction_window_add', m.refraction_window_add + 0.06),
+                                      setattr(m, 'enemy_hp_mult', m.enemy_hp_mult * 1.2))},
+    'gambler': {'name': 'Кость игрока', 'desc': 'Проклятый: +10% шанс крита, −20% макс. HP', 'arch': 'any',
+                'rarity': 'cursed', 'unique': True, 'weight': 0.4,
+                'apply': lambda m: (setattr(m, 'crit_add', m.crit_add + 0.10), setattr(m, 'max_hp_mult', m.max_hp_mult * 0.8))},
+    # Набор «Триада»: 3 предмета → бонус
+    'triad_red': {'name': 'Триада: алый осколок', 'desc': '+8% урона RED. Набор «Триада» (3 шт.)', 'arch': 'any',
+                  'set': 'triad', 'unique': True,
+                  'apply': lambda m: m.mode_damage_mult.__setitem__('RED', m.mode_damage_mult['RED'] * 1.08)},
+    'triad_blue': {'name': 'Триада: синий осколок', 'desc': '+8% урона BLUE. Набор «Триада» (3 шт.)', 'arch': 'any',
+                   'set': 'triad', 'unique': True,
+                   'apply': lambda m: m.mode_damage_mult.__setitem__('BLUE', m.mode_damage_mult['BLUE'] * 1.08)},
+    'triad_green': {'name': 'Триада: зелёный осколок', 'desc': '+8% урона GREEN. Набор «Триада» (3 шт.)', 'arch': 'any',
+                    'set': 'triad', 'unique': True,
+                    'apply': lambda m: m.mode_damage_mult.__setitem__('GREEN', m.mode_damage_mult['GREEN'] * 1.08)},
+})
+ARTIFACT_SETS = {
+    'triad': {'name': 'Триада', 'need': 3, 'desc': 'Полный набор: цепные реакции ×2 и +15% урона',
+              'apply': lambda m: (setattr(m, 'chain_damage_mult', m.chain_damage_mult * 2.0),
+                                  setattr(m, 'damage_mult', m.damage_mult * 1.15))},
+}
+RARITY_NAMES = {'common': 'Обычный', 'legendary': 'Легендарный', 'cursed': 'Проклятый'}
+
+
+def completed_sets(owned: List[str]) -> List[str]:
+    out = []
+    for sid, sd in ARTIFACT_SETS.items():
+        if sum(1 for a in owned if ARTIFACTS.get(a, {}).get('set') == sid) >= sd['need']:
+            out.append(sid)
+    return out
+
+
+def artifact_preview(mods: RunMods, aid: str) -> List[str]:
+    """Сравнение статов «до → после» для экрана выбора артефакта."""
+    after = copy.deepcopy(mods)
+    ARTIFACTS[aid]['apply'](after)
+    return diff_mods(mods, after)
+
 def roll_artifacts(rng: random.Random, archetype: str, owned: List[str], count: int = 3) -> List[str]:
     """Взвешенный выбор: артефакты под стиль игрока выпадают в 2.5 раза чаще."""
     pool = [a for a, d in ARTIFACTS.items() if not (d.get('unique') and a in owned)]
@@ -521,6 +836,20 @@ RISKS: Dict[str, Dict[str, Any]] = {
     'blind': {'name': 'Узкая грань', 'desc': 'Окно Преломления −30%', 'cp': 0.20,
               'apply': lambda m: setattr(m, 'refraction_window_mult', m.refraction_window_mult * 0.7)},
 }
+RISKS.update({
+    'eclipse': {'name': 'Затмение', 'desc': 'Каждая волна — тёмная', 'cp': 0.20,
+                'apply': lambda m: setattr(m, 'always_dark', True)},
+    'swarming': {'name': 'Рой', 'desc': 'Роёв вдвое больше', 'cp': 0.15,
+                 'apply': lambda m: setattr(m, 'swarm_mult', m.swarm_mult * 2.0)},
+    'unstable': {'name': 'Нестабильность', 'desc': 'Каждые 20 с цвет меняется сам', 'cp': 0.20,
+                 'apply': lambda m: setattr(m, 'unstable_colors', True)},
+    'glass': {'name': 'Стекло', 'desc': 'Любой удар отнимает минимум 25 HP', 'cp': 0.30,
+              'apply': lambda m: setattr(m, 'glass_mode', True)},
+})
+# Орда 0.7.0: действительно много врагов
+RISKS['horde'] = {'name': 'Орда', 'desc': f"Бюджет волн ×{CFG.HORDE_BUDGET_MULT:g}, короткие паузы, больше роёв",
+                  'cp': 0.30, 'apply': lambda m: (setattr(m, 'budget_mult', m.budget_mult * CFG.HORDE_BUDGET_MULT),
+                                                  setattr(m, 'swarm_mult', m.swarm_mult * 1.5))}
 
 DIFFICULTIES: Dict[str, Dict[str, Any]] = {
     'story': {'name': 'Сюжет', 'enemy_hp': 0.8, 'enemy_damage': 0.6, 'enemy_speed': 0.9, 'refraction_window': 1.4, 'cp': 0.7},
@@ -616,7 +945,28 @@ ACHIEVEMENTS: List[Tuple[str, str, str, Callable, float, int, Optional[str]]] = 
     ('artifacts_10', 'Коллекционер', 'Возьмите 10 артефактов', _s('artifacts'), 10, 30, None),
     ('contracts_10', 'Наёмник', 'Выполните 10 контрактов', _s('contracts_done'), 10, 50, None),
 ]
+ACHIEVEMENTS += [
+    ('violet_100', 'Фиолетовая фаза', '100 убийств в VIOLET', lambda p, r: p['stats']['mode_kills'].get('VIOLET', 0), 100, 40, None),
+    ('warden_1', 'Страж повержен', 'Победите мини-босса', lambda p, r: p['stats']['codex'].get('warden', 0), 1, 30, None),
+    ('hydra_1', 'Три головы', 'Победите Хроматическую Гидру', _s('hydra_kills'), 1, 80, None),
+    ('spectrum_1', 'Абсолютный Спектр', 'Победите финального босса', _s('spectrum_kills'), 1, 150, 'title:Спектр'),
+    ('victory_1', 'Победа', 'Пройдите 30 волн стандартного забега', _s('victories'), 1, 200, 'trail_style:rainbow'),
+    ('swarm_500', 'Против роя', 'Уничтожьте 500 врагов «Рой»', lambda p, r: p['stats']['codex'].get('swarm', 0), 500, 40, None),
+    ('vortex_10', 'Вихрь', '10 раз запустите Хроматический вихрь', _s('vortexes'), 10, 30, None),
+    ('parry_touch_20', 'Касание', '20 парирований касанием', _s('touch_parries'), 20, 30, None),
+    ('chain_50', 'Цепная реакция', '50 цепных реакций', _s('chains'), 50, 30, None),
+    ('precise_200', 'Точность', '200 «точных» убийств', _s('precise_kills'), 200, 40, None),
+    ('absorb_100', 'Поглотитель', 'Поглотите 100 цветных пуль', _s('absorbed'), 100, 30, None),
+    ('horde_15', 'Орда', 'Дойдите до волны 15 с риском «Орда»', _s('horde_best_wave'), 15, 80, None),
+    ('blitz_50k', 'Блиц', 'Наберите 50 000 очков в Блице', _s('blitz_best'), 50000, 60, None),
+    ('bossrush_1', 'Босс-раш', 'Пройдите Босс-раш', _s('bossrush_clears'), 1, 120, None),
+    ('shop_10', 'Покупатель', 'Купите 10 вещей в магазине забега', _s('shop_buys'), 10, 20, None),
+    ('trial_all', 'Ученик цвета', 'Пройдите все испытания тренировки', lambda p, r: len(p.get('trials_done', [])), 5, 50, None),
+    ('prestige_1', 'Престиж', 'Получите престиж дерева', lambda p, r: p.get('prestige', 0), 1, 0, None),
+    ('gamble_5', 'Азарт', 'Выиграйте 5 ставок на волну', _s('gambles_won'), 5, 30, None),
+]
 ACH_BY_ID = {a[0]: a for a in ACHIEVEMENTS}
+COSMETICS['title']['Спектр'] = 'Спектр'
 
 CONTRACT_TEMPLATES: List[Tuple[str, str, str, int, int]] = [
     # (id, описание, ключ статистики забега, цель, награда)
@@ -630,7 +980,26 @@ CONTRACT_TEMPLATES: List[Tuple[str, str, str, int, int]] = [
     ('elites', 'Уничтожьте {n} элит', 'elites', 6, 30),
     ('dashes', 'Сделайте {n} рывков', 'dashes', 80, 20),
     ('resonance', 'Создайте {n} Резонансов', 'resonances', 8, 25),
+    ('kills_violet', 'Уничтожьте {n} врагов в VIOLET', 'kills_VIOLET', 40, 30),
+    ('precise', 'Сделайте {n} «точных» убийств', 'precise_kills', 30, 25),
+    ('absorb', 'Поглотите {n} цветных пуль', 'absorbed', 15, 25),
 ]
+WEEKLY_CONTRACT_TEMPLATES: List[Tuple[str, str, str, int, int]] = [
+    ('w_kills', 'За неделю уничтожьте {n} врагов', 'kills', 1500, 120),
+    ('w_waves', 'За неделю пройдите {n} волн', 'waves_cleared', 80, 120),
+    ('w_bosses', 'За неделю победите {n} боссов', 'bosses', 3, 150),
+    ('w_refract', 'За неделю совершите {n} Преломлений', 'refractions', 100, 120),
+    ('w_chains', 'За неделю устройте {n} цепных реакций', 'chains', 60, 100),
+    ('w_swarm', 'За неделю уничтожьте {n} врагов «Рой» (по кодексу)', 'swarm_kills', 400, 100),
+]
+DAILY_RULES = {
+    'none': ('Без особого правила', ''),
+    'swarm_day': ('День роя', 'Роёв вдвое больше'),
+    'violet_day': ('Фиолетовый день', 'VIOLET открыт для всех'),
+    'glass_day': ('Стеклянный день', '+30% урона, −30% HP'),
+    'rush_day': ('День спешки', 'Короткие паузы между волнами'),
+    'crit_day': ('День удачи', '+10% шанс крита'),
+}
 
 
 def date_key(d: Optional[_dt.date] = None) -> str:
@@ -651,9 +1020,24 @@ def challenge_setup(kind: str, d: Optional[_dt.date] = None) -> Dict[str, Any]:
     """Одинаковые для всех условия: арена, риски, стартовый цвет — из seed по дате/неделе."""
     rng = random.Random(challenge_seed(kind, d))
     risks = rng.sample(sorted(RISKS), 1 if kind == 'daily' else 2)
-    return {'seed': challenge_seed(kind, d), 'arena': rng.choice(['classic', 'pillars', 'prism']),
+    rule = rng.choice(sorted(r for r in DAILY_RULES if r != 'none'))
+    return {'seed': challenge_seed(kind, d), 'arena': rng.choice(['classic', 'pillars', 'prism', 'portals']),
             'risks': risks, 'start_mode': rng.choice(MODES), 'tension': 0 if kind == 'daily' else 2,
-            'key': date_key(d) if kind == 'daily' else week_key(d)}
+            'key': date_key(d) if kind == 'daily' else week_key(d), 'rule': rule}
+
+
+def apply_daily_rule(m: RunMods, rule: str) -> None:
+    if rule == 'swarm_day':
+        m.swarm_mult *= 2.0
+    elif rule == 'violet_day':
+        m.violet_unlocked = True
+    elif rule == 'glass_day':
+        m.damage_mult *= 1.3
+        m.max_hp_mult *= 0.7
+    elif rule == 'crit_day':
+        m.crit_add += 0.10
+    if rule in DAILY_RULES and rule != 'none':
+        m.sources.append(f"Правило дня «{DAILY_RULES[rule][0]}»")
 
 
 # =====================================================================
@@ -673,8 +1057,11 @@ def default_profile(name: str = 'Пилот') -> Dict[str, Any]:
                   'echoes': 0, 'impulses': 0, 'resonances': 0, 'beat_kills': 0, 'bosses': 0, 'elites': 0,
                   'dashes': 0, 'switches': 0, 'play_time': 0.0, 'daily_runs': 0, 'weekly_runs': 0,
                   'tension_cleared': -1, 'pure_best_wave': 0, 'artifacts': 0, 'contracts_done': 0,
-                  'mode_kills': {m: 0 for m in MODES}, 'mode_time': {m: 0.0 for m in MODES},
-                  'codex': {}, 'deaths_by': {}, 'waves_cleared': 0},
+                  'mode_kills': {m: 0 for m in ALL_MODES}, 'mode_time': {m: 0.0 for m in ALL_MODES},
+                  'codex': {}, 'deaths_by': {}, 'waves_cleared': 0,
+                  'hydra_kills': 0, 'spectrum_kills': 0, 'victories': 0, 'vortexes': 0, 'touch_parries': 0,
+                  'chains': 0, 'precise_kills': 0, 'absorbed': 0, 'horde_best_wave': 0, 'blitz_best': 0,
+                  'bossrush_clears': 0, 'shop_buys': 0, 'gambles_won': 0, 'endless_best_wave': 0},
         'records': {}, 'history': [], 'leaderboard': [],
         'achievements': {}, 'cosmetics': {'ship_shape': 'circle', 'trail_style': 'mode', 'title': ''},
         'unlocked_cosmetics': list(DEFAULT_COSMETICS),
@@ -683,6 +1070,11 @@ def default_profile(name: str = 'Пилот') -> Dict[str, Any]:
         'tension_unlocked': 0, 'ghost': {'score': 0, 'wave_times': []},
         'death_streak': 0, 'assist_declined': False, 'seen_tips': [], 'archetype': 'balanced',
         'last_first_run_day': '',
+        # 0.7.0
+        'builds': [None, None, None], 'disabled_nodes': [], 'node_paid': {}, 'seen_nodes': [],
+        'last_free_reset': '', 'prestige': 0, 'node_stats': {}, 'hull_stats': {}, 'hull_challenges': [],
+        'weekly_contracts': {'week': '', 'list': []}, 'trials_done': [], 'seen_enemies': [],
+        'codex_seen': [], 'victory_seen': False,
     }
 
 
@@ -737,6 +1129,16 @@ def migrate_profile(data: Dict[str, Any]) -> Dict[str, Any]:
     data['history'] = data['history'][-20:]
     data['leaderboard'] = sorted(data['leaderboard'], key=lambda e: -e.get('score', 0))[:10]
     data['tension_unlocked'] = max(0, min(10, int(data.get('tension_unlocked', 0))))
+    # 0.7.0: сборки, переключатели, престиж
+    data['builds'] = (list(data.get('builds') or []) + [None, None, None])[:3]
+    data['disabled_nodes'] = [n for n in data.get('disabled_nodes', []) if n in UPGRADES]
+    data['node_paid'] = {k: int(v) for k, v in data.get('node_paid', {}).items() if k in data['upgrades']}
+    data['prestige'] = max(0, int(data.get('prestige', 0)))
+    for i in range(1, data['prestige'] + 1):
+        COSMETICS['title'][f'Престиж {i}'] = f'Престиж {i}'
+    if int(data.get('version', 1)) < 4:
+        # Узлы, существовавшие до 0.7.0, помечаем как «просмотренные», чтобы «НОВОЕ» горело только у новых
+        data['seen_nodes'] = sorted(set(data.get('seen_nodes', [])) | (set(UPGRADES) - NEW_IN_070))
     data['version'] = SAVE_VERSION
     data['game_version'] = GAME_VERSION
     return data
@@ -858,15 +1260,133 @@ class Profile:
         if status != 'available':
             return False, reason
         lvl = self.data['upgrades'].get(nid, 0)
-        self.data['cp'] -= UPGRADES[nid]['costs'][lvl]
+        cost = node_cost(self, nid)
+        self.data['cp'] -= cost
         self.data['upgrades'][nid] = lvl + 1
+        self.data.setdefault('node_paid', {})
+        self.data['node_paid'][nid] = self.data['node_paid'].get(nid, 0) + cost
+        if nid not in self.data['seen_nodes']:
+            self.data['seen_nodes'].append(nid)
         return True, f"{UPGRADES[nid]['name']}: уровень {lvl + 1}"
 
-    def reset_upgrades(self) -> int:
-        refund = sum(branch_spent(self.data['upgrades'], b) for b in BRANCHES)
+    def paid_for(self, nid: str) -> int:
+        lvl = self.data['upgrades'].get(nid, 0)
+        paid = self.data.get('node_paid', {}).get(nid)
+        if paid is None:
+            paid = sum(UPGRADES[nid]['costs'][:lvl]) if nid in UPGRADES else 0
+        return int(paid)
+
+    def reset_fee_free(self) -> bool:
+        return self.data.get('last_free_reset', '') != date_key()
+
+    def reset_upgrades(self, branch: Optional[str] = None) -> int:
+        """Сброс с возвратом CP. Раз в день — бесплатно, дальше удерживается 10%.
+        branch — частичный сброс одной ветки."""
+        nodes = [nid for nid in list(self.data['upgrades']) if nid in UPGRADES
+                 and (branch is None or UPGRADES[nid]['branch'] == branch)]
+        refund = sum(self.paid_for(nid) for nid in nodes)
+        if refund <= 0:
+            return 0
+        if self.reset_fee_free():
+            self.data['last_free_reset'] = date_key()
+        else:
+            refund = int(refund * 0.9)
         self.data['cp'] += refund
-        self.data['upgrades'] = {}
+        for nid in nodes:
+            self.data['upgrades'].pop(nid, None)
+            self.data.get('node_paid', {}).pop(nid, None)
+        # Узлы, потерявшие требования, тоже снимаются (с возвратом)
+        changed = True
+        while changed:
+            changed = False
+            for nid in list(self.data['upgrades']):
+                node = UPGRADES[nid]
+                if any(self.data['upgrades'].get(r, 0) <= 0 for r in node['requires']):
+                    self.data['cp'] += self.paid_for(nid)
+                    refund += self.paid_for(nid)
+                    self.data['upgrades'].pop(nid)
+                    self.data.get('node_paid', {}).pop(nid, None)
+                    changed = True
         return refund
+
+    # --- Сборки дерева ---
+    def save_build(self, slot: int, name: str = '') -> str:
+        builds = self.data['builds']
+        while len(builds) <= slot:
+            builds.append(None)
+        builds[slot] = {'name': name or f'Сборка {slot + 1}', 'upgrades': dict(self.data['upgrades']),
+                        'disabled': list(self.data['disabled_nodes'])}
+        return f"Сохранено: {builds[slot]['name']}"
+
+    def apply_build(self, upgrades: Dict[str, int], name: str = 'сборка') -> Tuple[bool, str]:
+        """Сбрасывает дерево и покупает узлы сборки по порядку, пока хватает CP."""
+        self.reset_upgrades()
+        order = sorted(upgrades, key=lambda n: (UPGRADES[n]['tier_cp'] + UPGRADES[n].get('total_cp', 0),
+                                                UPGRADES[n]['row']) if n in UPGRADES else (1e9, 0))
+        bought = missing = 0
+        for _ in range(3):  # несколько проходов — требования внутри сборки
+            for nid in order:
+                want = int(upgrades.get(nid, 0))
+                while nid in UPGRADES and self.data['upgrades'].get(nid, 0) < min(want, UPGRADES[nid]['max']):
+                    ok, _ = self.buy_upgrade(nid)
+                    if not ok:
+                        break
+                    bought += 1
+        for nid in order:
+            if nid in UPGRADES:
+                missing += max(0, min(int(upgrades[nid]), UPGRADES[nid]['max']) - self.data['upgrades'].get(nid, 0))
+        msg = f"«{name}»: куплено уровней {bought}" + (f", не хватило CP/условий на {missing}" if missing else '')
+        return missing == 0, msg
+
+    def build_code(self, upgrades: Optional[Dict[str, int]] = None) -> str:
+        import base64
+        ups = self.data['upgrades'] if upgrades is None else upgrades
+        raw = ';'.join(f"{k}:{v}" for k, v in sorted(ups.items()) if v > 0)
+        return 'CS7-' + base64.urlsafe_b64encode(raw.encode('utf-8')).decode('ascii').rstrip('=')
+
+    @staticmethod
+    def parse_build_code(code: str) -> Optional[Dict[str, int]]:
+        import base64
+        code = (code or '').strip()
+        if not code.startswith('CS7-'):
+            return None
+        body = code[4:]
+        try:
+            raw = base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)).decode('utf-8')
+            out = {}
+            for part in filter(None, raw.split(';')):
+                k, v = part.split(':')
+                if k in UPGRADES:
+                    out[k] = max(0, min(UPGRADES[k]['max'], int(v)))
+            return out
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def compare_build(self, upgrades: Dict[str, int]) -> List[str]:
+        """Сравнение текущего дерева и сборки по итоговым модификаторам."""
+        cur, other = RunMods(), RunMods()
+        for nid, lvl in self.data['upgrades'].items():
+            if nid in UPGRADES and lvl > 0:
+                UPGRADES[nid]['effect'](cur, lvl)
+        for nid, lvl in upgrades.items():
+            if nid in UPGRADES and lvl > 0:
+                UPGRADES[nid]['effect'](other, lvl)
+        return diff_mods(cur, other)
+
+    def can_prestige(self) -> bool:
+        return total_spent(self.data['upgrades']) >= PRESTIGE_SPENT
+
+    def prestige(self) -> Tuple[bool, str]:
+        if not self.can_prestige():
+            return False, f"Нужно вложить в дерево {PRESTIGE_SPENT} CP"
+        self.reset_upgrades()
+        self.data['cp'] = int(self.data['cp'] * 0.5)  # половина CP «сгорает» в престиже
+        self.data['prestige'] += 1
+        cos = f"title:Престиж {self.data['prestige']}"
+        if cos not in self.data['unlocked_cosmetics']:
+            self.data['unlocked_cosmetics'].append(cos)
+            COSMETICS['title'][cos.split(':', 1)[1]] = cos.split(':', 1)[1]
+        return True, f"Престиж {self.data['prestige']}: +{int(PRESTIGE_CP_BONUS * 100)}% CP навсегда"
 
     def recommended_upgrade(self) -> Optional[str]:
         arch = self.data.get('archetype', 'balanced')
@@ -938,22 +1458,52 @@ class Profile:
         lo['modules'] = valid
 
     # --- Сборка модификаторов забега ---
-    def build_mods(self, run_type: str, settings: Any, tension: int = 0, risks: Optional[List[str]] = None) -> RunMods:
+    def build_mods(self, run_type: str, settings: Any, tension: int = 0, risks: Optional[List[str]] = None,
+                   trial_node: Optional[str] = None) -> RunMods:
         m = RunMods()
         pure = run_type in ('pure', 'training')
+        ups = dict(self.data['upgrades'])
+        if trial_node and trial_node in UPGRADES:  # пробный режим: узел на следующем уровне
+            ups[trial_node] = min(UPGRADES[trial_node]['max'], ups.get(trial_node, 0) + 1)
+            pure = False
+        lo = self.loadout
         if not pure:
-            for nid, lvl in self.data['upgrades'].items():
-                if lvl > 0:
-                    UPGRADES[nid]['effect'](m, lvl)
+            disabled = set(self.data.get('disabled_nodes', []))
+            for nid, lvl in ups.items():
+                node = UPGRADES.get(nid)
+                if not node or lvl <= 0 or nid in disabled:
+                    continue
+                if node.get('hull') and node['hull'] != lo['hull']:
+                    continue
+                if node.get('from_wave'):
+                    m.wave_effects.append((node['from_wave'], nid, lvl))
+                    continue
+                node['effect'](m, lvl)
+                if node.get('grow'):
+                    stat, per, step, cap = node['grow']
+                    bonus = min(cap, step * int(self.data['stats'].get(stat, 0) // per))
+                    m.damage_mult *= 1 + bonus
+                ev = node.get('evolve')
+                if ev and lvl >= node['max'] and self.data['stats'].get(ev['stat'], 0) >= ev['goal']:
+                    ev['effect'](m, 1)
             m.sources.append('Дерево улучшений')
-            lo = self.loadout
-            HULLS[lo['hull']]['apply'](m)
-            m.sources.append(f"Корпус «{HULLS[lo['hull']]['name']}»")
+            hull = HULLS.get(lo['hull'], HULLS['prism'])
+            hull['apply'](m)
+            m.sources.append(f"Корпус «{hull['name']}»")
+            hm = self.hull_mastery(lo['hull'])
+            if hm:
+                m.damage_mult *= 1 + 0.02 * hm
+                m.sources.append(f"Мастерство корпуса {hm}")
             for mid in lo['modules']:
                 MODULES[mid]['apply'](m)
             for syn in active_synergies(lo['modules']):
                 syn['apply'](m)
                 m.sources.append(f"Синергия «{syn['name']}»")
+            if self.data.get('prestige', 0):
+                m.cp_mult += PRESTIGE_CP_BONUS * self.data['prestige']
+                m.sources.append(f"Престиж {self.data['prestige']}")
+        if run_type == 'training':
+            m.violet_unlocked = True  # в тренировке можно попробовать все цвета
         apply_difficulty(m, settings)
         apply_tension(m, tension)
         for rid in risks or []:
@@ -963,7 +1513,38 @@ class Profile:
                 m.sources.append(f"Риск «{RISKS[rid]['name']}»")
         if run_type == 'training':
             m.cp_mult = 0.0
+        apply_caps(m)
         return m
+
+    def apply_wave_effects(self, m: RunMods, wave: int) -> List[str]:
+        """Включает узлы «с волны N». Возвращает названия включённых."""
+        on = []
+        for item in list(m.wave_effects):
+            w, nid, lvl = item
+            if wave >= w:
+                UPGRADES[nid]['effect'](m, lvl)
+                m.wave_effects.remove(item)
+                on.append(UPGRADES[nid]['name'])
+        if on:
+            apply_caps(m)
+        return on
+
+    # --- Корпуса: мастерство и испытания ---
+    def hull_mastery(self, hid: str) -> int:
+        """Уровень мастерства корпуса 0–5: растёт от пройденных на нём волн."""
+        waves = self.data['hull_stats'].get(hid, {}).get('waves', 0)
+        return min(5, int(waves // 40))
+
+    def toggle_node(self, nid: str) -> Tuple[bool, str]:
+        node = UPGRADES.get(nid)
+        if not node or not node.get('toggle') or self.data['upgrades'].get(nid, 0) <= 0:
+            return False, 'Этот узел нельзя переключать'
+        dis = self.data['disabled_nodes']
+        if nid in dis:
+            dis.remove(nid)
+            return True, f"«{node['name']}» включён"
+        dis.append(nid)
+        return True, f"«{node['name']}» выключен"
 
     # --- Контракты ---
     def refresh_contracts(self, today: Optional[_dt.date] = None) -> None:
@@ -974,6 +1555,17 @@ class Profile:
         rng = random.Random(challenge_seed('daily', today) + self.slot)
         picks = rng.sample(CONTRACT_TEMPLATES, 3)
         c['date'] = key
+        c['list'] = [{'id': t[0], 'desc': t[1].format(n=t[3]), 'stat': t[2], 'goal': t[3],
+                      'reward': t[4], 'progress': 0, 'done': False} for t in picks]
+
+    def refresh_weekly_contracts(self, today: Optional[_dt.date] = None) -> None:
+        key = week_key(today)
+        c = self.data['weekly_contracts']
+        if c.get('week') == key and c.get('list'):
+            return
+        rng = random.Random(challenge_seed('weekly', today) + 31 * (self.slot + 1))
+        picks = rng.sample(WEEKLY_CONTRACT_TEMPLATES, 3)
+        c['week'] = key
         c['list'] = [{'id': t[0], 'desc': t[1].format(n=t[3]), 'stat': t[2], 'goal': t[3],
                       'reward': t[4], 'progress': 0, 'done': False} for t in picks]
 
@@ -988,6 +1580,17 @@ class Profile:
                 self.add_cp(c['reward'])
                 self.data['stats']['contracts_done'] += 1
                 done.append(f"Контракт выполнен: {c['desc']} (+{c['reward']} CP)")
+        self.refresh_weekly_contracts()
+        for c in self.data['weekly_contracts'].get('list', []):
+            if c['done']:
+                continue
+            val = run.get('codex', {}).get('swarm', 0) if c['stat'] == 'swarm_kills' else run.get(c['stat'], 0)
+            c['progress'] = min(c['goal'], c['progress'] + int(val))
+            if c['progress'] >= c['goal']:
+                c['done'] = True
+                self.add_cp(c['reward'])
+                self.data['stats']['contracts_done'] += 1
+                done.append(f"Недельный контракт: {c['desc']} (+{c['reward']} CP)")
         return done
 
     # --- Достижения ---
@@ -1028,12 +1631,48 @@ class Profile:
             return result
         st['runs'] += 1
         for key in ('kills', 'refractions', 'refraction_fails', 'echoes', 'impulses', 'resonances',
-                    'beat_kills', 'bosses', 'elites', 'dashes', 'switches', 'artifacts', 'waves_cleared'):
+                    'beat_kills', 'bosses', 'elites', 'dashes', 'switches', 'artifacts', 'waves_cleared',
+                    'hydra_kills', 'spectrum_kills', 'vortexes', 'touch_parries', 'chains', 'precise_kills',
+                    'absorbed', 'shop_buys', 'gambles_won'):
             st[key] = st.get(key, 0) + int(run.get(key, 0))
+        wv = int(run.get('wave', 1))
+        if run.get('victory'):
+            st['victories'] = st.get('victories', 0) + 1
+        if 'horde' in run.get('risks', []):
+            st['horde_best_wave'] = max(st.get('horde_best_wave', 0), wv)
+        if run_type == 'blitz':
+            st['blitz_best'] = max(st.get('blitz_best', 0), int(run.get('score', 0)))
+        if run_type == 'bossrush' and run.get('victory'):
+            st['bossrush_clears'] = st.get('bossrush_clears', 0) + 1
+        if run_type == 'endless':
+            st['endless_best_wave'] = max(st.get('endless_best_wave', 0), wv)
+        # Статистика узлов (с какими узлами вы доходите дальше)
+        for nid, lvl in self.data['upgrades'].items():
+            if lvl > 0:
+                ns = self.data['node_stats'].setdefault(nid, {'runs': 0, 'waves': 0, 'best': 0})
+                ns['runs'] += 1
+                ns['waves'] += wv
+                ns['best'] = max(ns['best'], wv)
+        # Корпус: мастерство и испытание
+        hid = run.get('hull') or self.loadout['hull']
+        hs = self.data['hull_stats'].setdefault(hid, {'runs': 0, 'waves': 0, 'best': 0})
+        hs['runs'] += 1
+        hs['waves'] += int(run.get('waves_cleared', 0))
+        hs['best'] = max(hs['best'], wv)
+        ch = HULL_CHALLENGES.get(hid)
+        if ch and hid not in self.data['hull_challenges']:
+            val = wv if ch[1] == 'best_wave' else int(run.get(ch[1], 0))
+            if val >= ch[2]:
+                self.data['hull_challenges'].append(hid)
+                self.data['prisms'] += 1
+                result['notices'].append(f"Испытание корпуса «{HULLS[hid]['name']}» пройдено: +1 призма")
         st['play_time'] += float(run.get('time', 0.0))
-        for m in MODES:
+        for m in ALL_MODES:
             st['mode_kills'][m] = st['mode_kills'].get(m, 0) + int(run.get(f'kills_{m}', 0))
             st['mode_time'][m] = st['mode_time'].get(m, 0.0) + float(run.get(f'time_{m}', 0.0))
+        for kind in run.get('codex', {}):
+            if kind not in self.data['seen_enemies']:
+                self.data['seen_enemies'].append(kind)
         for kind, n in run.get('codex', {}).items():
             st['codex'][kind] = st['codex'].get(kind, 0) + n
         cause = run.get('death_cause', '')

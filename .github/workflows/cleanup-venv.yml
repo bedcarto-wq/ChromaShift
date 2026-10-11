@@ -1,0 +1,26 @@
+name: Cleanup venv
+
+# 0.7.0: в репозиторий когда-то попала папка chromashift/venv (~1600 файлов виртуального окружения).
+# Через API её не удалить одним коммитом, поэтому разовая чистка делается здесь. Повторный запуск безопасен.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/cleanup-venv.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove venv from index
+        run: |
+          if [ -z "$(git ls-files chromashift/venv | head -1)" ]; then echo "venv уже удалён"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r -q --cached chromashift/venv
+          git commit -m "Удалена папка chromashift/venv из репозитория (виртуальное окружение не хранится в git)"
+          git push

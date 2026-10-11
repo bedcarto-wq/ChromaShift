@@ -63,14 +63,54 @@ jobs:
           name: windows-build
           path: ChromaShift-*-windows.zip
 
+  # 0.7.0: сборки для Linux и macOS (без подписи). Их сбой не блокирует релиз Windows.
+  build-unix:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tag: linux
+          - os: macos-latest
+            tag: macos
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame numpy pyinstaller
+      - name: Generate sound assets
+        working-directory: chromashift
+        run: python -m cshift.sound_design assets/sounds
+      - name: Build binary
+        working-directory: chromashift
+        run: pyinstaller --noconfirm --onefile --windowed --name ChromaShift --add-data "assets:assets" --hidden-import numpy main.py
+      - name: Package
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          mkdir -p pkg
+          if [ -d chromashift/dist/ChromaShift.app ]; then cp -R chromashift/dist/ChromaShift.app pkg/; fi
+          if [ -f chromashift/dist/ChromaShift ]; then cp chromashift/dist/ChromaShift pkg/ && chmod +x pkg/ChromaShift; fi
+          cp README.md CHANGELOG.md pkg/
+          tar -czf "ChromaShift-$v-${{ matrix.tag }}.tar.gz" -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tag }}-build
+          path: ChromaShift-*-${{ matrix.tag }}.tar.gz
+
   release:
-    needs: build-windows
+    needs: [build-windows, build-unix]
+    if: ${{ !cancelled() && needs.build-windows.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: windows-build
+          pattern: '*-build'
+          merge-multiple: true
       - id: v
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
       - name: Source archive (без venv)
@@ -83,4 +123,6 @@ jobs:
           make_latest: true
           files: |
             ChromaShift-*-windows.zip
+            ChromaShift-*-linux.tar.gz
+            ChromaShift-*-macos.tar.gz
             ChromaShift-*-source.zip
