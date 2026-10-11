@@ -107,6 +107,10 @@ class Game:
         self.hud = HUD(self)
         self.ui = UIManager(self)
         self.ui.push(MainMenu(self))
+        self.update_notice = ''
+        if self.settings.get('check_updates', False) and not headless:
+            from .updates import start_check
+            start_check(self)
         if self.profile.load_warning:
             self.toast(self.profile.load_warning)
 
@@ -1280,6 +1284,11 @@ class Game:
             from .ui import draw_world
             draw_world(self, surf)
             if self.in_run:
+                from .ui import draw_minimap, draw_post_fx
+                if self.settings.get('minimap', False):
+                    draw_minimap(self, surf)
+                if self.settings.get('post_fx', True):
+                    draw_post_fx(self, surf)
                 self.hud.draw(surf)
         else:
             from .ui import draw_background

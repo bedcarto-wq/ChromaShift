@@ -263,7 +263,55 @@ def ui_select():
     return _arp([660, 990], 0.04, 'sine', 0.2)
 
 
+# --- 0.7.0: VIOLET и новые механики ---
+def mode_violet():
+    return _norm(_mix(_sweep(700, 980, 0.07, 'tri', 0.5), _sweep(1050, 1470, 0.07, 'sine', 0.5) * 0.5)
+                 * _e(0.07, 0, 0.3, 0.4, 0.5), 0.4)
+
+
+def shoot_violet():
+    d = 0.1
+    body = _sweep(1800, 900, d, 'tri', 0.5) * _e(d, 0.005, 0.2, 0.4, 0.6)
+    shimmer = _sweep(2700, 1350, d, 'sine', 0.5) * _e(d, 0, 0.3, 0.3, 0.6) * 0.4
+    return _norm(_reverb(_mix(body, shimmer), 0.25, tail=0.1), 0.42)
+
+
+def absorb():
+    d = 0.16
+    return _norm(_reverb(_sweep(1600, 500, d, 'sine', 0.4) * _e(d, 0.01, 0.2, 0.5, 0.6), 0.3, tail=0.1), 0.4)
+
+
+def overload():
+    d = 0.6
+    x = _mix(_sweep(80, 320, d, 'saw', 0.7), _sweep(160, 640, d, 'square', 0.7) * 0.3,
+             _highpass(_noise(d, 7), 2500) * 0.25)
+    return _norm(_reverb(_lowpass(x, 3000) * _e(d, 0.02, 0.3, 0.7, 0.4), 0.45, tail=0.3), 0.8)
+
+
+def parry_touch():
+    return _norm(_mix(_sweep(1500, 2400, 0.06, 'sine'), _highpass(_noise(0.04, 3), 4000) * 0.3)
+                 * _e(0.06, 0, 0.2, 0.3, 0.6), 0.5)
+
+
+def skill():
+    return _arp([523, 659, 988], 0.05, 'saw', 0.4)
+
+
+def ability():
+    d = 0.45
+    x = _mix(_sweep(120, 60, d, 'sine'), _highpass(_noise(d, 11), 800) * _e(d, 0, 0.1, 0.2, 0.7) * 0.5)
+    return _norm(_reverb(x * _e(d, 0.005, 0.2, 0.5, 0.6), 0.4, tail=0.3), 0.75)
+
+
+def portal():
+    d = 0.25
+    return _norm(_reverb(_mix(_sweep(300, 1200, d, 'sine', 0.5), _sweep(450, 1800, d, 'tri', 0.5) * 0.4)
+                         * _e(d, 0.02, 0.2, 0.5, 0.5), 0.4, tail=0.15), 0.45)
+
+
 RECIPES: Dict[str, Callable] = {
+    'mode_violet': mode_violet, 'shoot_violet': shoot_violet, 'absorb': absorb, 'overload': overload,
+    'parry_touch': parry_touch, 'skill': skill, 'ability': ability, 'portal': portal,
     'shoot_red': shoot_red, 'shoot_blue': shoot_blue, 'shoot_green': shoot_green,
     'refraction': refraction, 'refraction_perfect': refraction_perfect, 'hit': hit,
     'death': death, 'enemy_death': enemy_death, 'pickup': pickup, 'wave': wave_sound,
@@ -290,13 +338,15 @@ def write_wav(path: str, data) -> None:
         w.writeframes(np.column_stack([pcm, pcm]).ravel().tobytes())
 
 
-def generate_all(folder: str, overwrite: bool = False) -> int:
-    """Генерирует недостающие WAV. Возвращает число созданных файлов."""
+def generate_all(folder: str, overwrite: bool = False, only=None) -> int:
+    """Генерирует недостающие WAV (only — ограничить списком имён). Возвращает число созданных файлов."""
     if np is None:
         return 0
     os.makedirs(folder, exist_ok=True)
     made = 0
     for name, recipe in RECIPES.items():
+        if only is not None and name not in only:
+            continue
         path = os.path.join(folder, f"{name}.wav")
         if os.path.exists(path) and not overwrite:
             continue

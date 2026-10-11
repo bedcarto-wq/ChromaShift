@@ -124,9 +124,56 @@ def draw_background(game: Any, surf: pygame.Surface, menu: bool = False) -> None
         pygame.draw.line(surf, grid, (0, y), (CFG.SCREEN_WIDTH, y), 1)
 
 
+_FX_CACHE: Dict[Any, Any] = {}
+
+
 def clear_ui_caches() -> None:
     """Вызывается при смене масштаба рендера."""
     _PANEL_CACHE.clear()
+    _FX_CACHE.clear()
+
+
+def draw_post_fx(game: Any, surf: pygame.Surface) -> None:
+    """Виньетка (кэшируется) и красное свечение по краям при низком HP."""
+    W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
+    vig = _FX_CACHE.get('vignette')
+    if vig is None:
+        vig = layer((W, H), pygame.SRCALPHA)
+        steps = 14
+        for i in range(steps):
+            a = int(70 * (1 - i / steps) ** 2)
+            pygame.draw.rect(vig, (0, 0, 0, a), (i * 6, i * 5, W - i * 12, H - i * 10), 6)
+        _FX_CACHE['vignette'] = vig
+    surf.blit(vig, (0, 0))
+    p = getattr(game, 'player', None)
+    if p is not None and p.max_hp > 0 and p.hp / p.max_hp < 0.3 and p.hp > 0:
+        low = _FX_CACHE.get('lowhp')
+        if low is None:
+            low = layer((W, H), pygame.SRCALPHA)
+            for i in range(10):
+                pygame.draw.rect(low, (220, 30, 40, int(60 * (1 - i / 10))), (i * 4, i * 4, W - i * 8, H - i * 8), 4)
+            _FX_CACHE['lowhp'] = low
+        surf.blit(low, (0, 0))
+
+
+def draw_minimap(game: Any, surf: pygame.Surface) -> None:
+    """Миникарта арены в правом нижнем углу: игрок, враги (цветом уязвимости), боссы крупнее."""
+    W, H = CFG.SCREEN_WIDTH, CFG.SCREEN_HEIGHT
+    mw, mh = 176, 99
+    x0, y0 = W - mw - 14, H - mh - 44
+    panel(surf, (x0, y0, mw, mh), 150)
+    k = mw / W
+    for e in getattr(game, 'enemies', []):
+        if not getattr(e, 'alive', True):
+            continue
+        c = getattr(e, 'color_tag', None) or getattr(e, 'vulnerable_mode', None)
+        col = mode_color(c) if c in ALL_MODES else (230, 90, 90)
+        ex = int(clamp(x0 + e.x * k, x0 + 2, x0 + mw - 2))
+        ey = int(clamp(y0 + e.y * k, y0 + 2, y0 + mh - 2))
+        pygame.draw.circle(surf, col, (ex, ey), 4 if isinstance(e, BossEnemy) or e.radius > 30 else 2)
+    p = getattr(game, 'player', None)
+    if p is not None:
+        pygame.draw.circle(surf, (255, 255, 255), (int(x0 + p.x * k), int(y0 + p.y * k)), 3)
 
 
 def _dark_overlay(game: Any) -> pygame.Surface:
@@ -712,6 +759,9 @@ class MainMenu(ListScreen):
                            15, col, rect.x + 16, y, rect.w - 32)
             y += 4
         y += 12
+        note = getattr(self.game, 'update_notice', '')
+        if note:
+            y = text_block(surf, note, 14, CFG.COLOR_SUCCESS, rect.x + 16, y, rect.w - 32) + 8
         st = p.data['stats']
         text(surf, f"Лучшая волна: {st['best_wave']} · Лучший счёт: {st['best_score']}", 15, (180, 190, 210), (rect.x + 16, y))
         y += 22
@@ -795,7 +845,7 @@ class PlayMenu(ListScreen):
             'training': 'Манекены и турели, урон отключён, награды не начисляются',
             'endless': 'Без победы на 30-й волне: волны растут бесконечно, спецволны чаще. Отдельный рекорд',
             'blitz': 'Ровно 10 минут, волны идут без пауз. Цель — максимум очков',
-            'bossrush': 'Только боссы и мини-боссы подряд: Ядро, Гидра, Спектр, Страж',
+            'bossrush': 'Только боссы подряд: Ядро, Гидра, Спектр. Победа — после третьего',
         }.get(rt, '')
 
     def tension_desc(self) -> str:
@@ -1134,7 +1184,9 @@ class AudioVideoScreen(ListScreen):
             _bool_item(g, 'Постэффекты', 'post_fx', 'Виньетка и свечение по краям экрана'),
             _bool_item(g, 'Компактный HUD', 'hud_compact', 'Меньше подсказок и тегов на экране'),
             _bool_item(g, 'Замедление на последнем убийстве', 'slowmo'),
-            _bool_item(g, 'Миникарта', 'minimap', 'Точки врагов за краем обзора'),
+            _bool_item(g, 'Миникарта', 'minimap', 'Схема арены в углу: игрок и враги цветом уязвимости'),
+            _bool_item(g, 'Проверять обновления', 'check_updates',
+                       'Один запрос к GitHub при запуске игры (выключено по умолчанию). Ничего не скачивается'),
             Item('Полный экран', lambda: 'Вкл' if g.settings.get('fullscreen') else 'Выкл', confirm=g.toggle_fullscreen, desc='Также F11'),
         ]
 

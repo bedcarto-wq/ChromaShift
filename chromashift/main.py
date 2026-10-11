@@ -22,7 +22,44 @@ def main() -> None:
         raise
     except Exception:
         logging.getLogger('ChromaShift').exception('Критическая ошибка')
+        path = write_crash_report(BASE_DIR)
+        show_crash_message(path)
         raise
+
+
+def write_crash_report(folder: str) -> str:
+    """0.7.0: отчёт о вылете — версия, система, трассировка. Файл можно приложить к issue."""
+    import datetime
+    import platform
+    import traceback
+    try:
+        from cshift.config import GAME_VERSION
+    except Exception:
+        GAME_VERSION = '?'
+    name = 'crash_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + '.txt'
+    path = os.path.join(folder, name)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(f"ChromaShift {GAME_VERSION}\n{platform.platform()}\nPython {sys.version}\n\n")
+            f.write(traceback.format_exc())
+        return path
+    except OSError:
+        return ''
+
+
+def show_crash_message(path: str) -> None:
+    msg = ('ChromaShift завершилась с ошибкой.\n' +
+           (f'Отчёт сохранён: {path}\n' if path else '') +
+           'Пришлите его разработчику: https://github.com/bedcarto-wq/ChromaShift/issues')
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, msg, 'ChromaShift — ошибка', 0x10)
+            return
+        except Exception:
+            pass
+    if sys.stderr is not None:
+        print(msg, file=sys.stderr)
 
 
 if __name__ == '__main__':
