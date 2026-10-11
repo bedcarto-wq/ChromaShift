@@ -70,7 +70,7 @@ def bot_step(g, frames, god=False, switch=True):
 
 class TestConfigAndMods(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(GAME_VERSION, '0.6.5')
+        self.assertEqual(GAME_VERSION, '0.7.0')
         with open(os.path.join(GAME_DIR, '..', 'VERSION'), encoding='utf-8') as f:
             self.assertEqual(f.read().strip(), GAME_VERSION)
 
@@ -144,8 +144,9 @@ class TestUpgradeTree(unittest.TestCase):
         self.p.buy_upgrade('core_hp')
         self.p.buy_upgrade('core_hp')
         self.p.buy_upgrade('blue_power')
+        paid = 10000 - self.p.cp  # 0.7.0: цены нелинейные — возвращаем ровно уплаченное
         refund = self.p.reset_upgrades()
-        self.assertEqual(refund, 20 + 35 + 25)
+        self.assertEqual(refund, paid)
         self.assertEqual(self.p.cp, 10000)
         self.assertEqual(self.p.data['upgrades'], {})
 
@@ -158,6 +159,8 @@ class TestUpgradeTree(unittest.TestCase):
         for nid, node in pr.UPGRADES.items():
             m = pr.RunMods()
             node['effect'](m, node['max'])
+            if node.get('grow'):  # растущий узел действует через статистику профиля
+                continue
             self.assertNotEqual(m.to_dict(), pr.RunMods().to_dict(), nid)
 
 
@@ -384,7 +387,11 @@ class TestWaves(unittest.TestCase):
         d = self.g.director
         d.wave = 4
         d.begin_wave()
-        self.assertTrue(d.is_breather)
+        # 0.7.0: на 5-й волне — мини-босс, выбор из двух бонусов после победы над ним
+        self.assertTrue(d.is_miniboss)
+        self.assertTrue(any(t['kind'] == 'warden' for grp in d.subwaves for t in grp))
+        self.g.powerups = []
+        d.finish_wave()
         groups = [p.group for p in self.g.powerups]
         self.assertEqual(len(groups), 2)
         self.assertEqual(groups[0], groups[1])
@@ -592,7 +599,7 @@ class TestFullRuns(unittest.TestCase):
                 g.step(1 / 60, [])
             g.draw()
             if sp == 'mono':
-                self.assertTrue(all(e.vulnerable_mode == d.mono_mode for e in g.enemies if e.kind != 'dissonance'))
+                self.assertTrue(all(e.vulnerable_mode == d.mono_mode for e in g.enemies if e.kind not in ('dissonance', 'swarm')))
         CFG.set_override('SPECIAL_WAVE_CHANCE', 0.15)
 
     def test_stress_performance(self):
@@ -649,7 +656,9 @@ class TestScreens(unittest.TestCase):
         g.ui.push(s)
         s.on_action('confirm')
         self.assertEqual(g.profile.data['upgrades'].get('core_hp'), 1)
-        s.on_action('reset')
+        s.on_action('reset')  # 0.7.0: меню сброса (ветка / всё дерево)
+        g.ui.top().on_action('down')  # «Сбросить всё дерево»
+        g.ui.top().on_action('confirm')
         g.ui.top().on_action('up')  # «Да»
         g.ui.top().on_action('confirm')
         self.assertEqual(g.profile.data['upgrades'], {})

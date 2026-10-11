@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-GAME_VERSION = "0.6.5"
+GAME_VERSION = "0.7.0"
 
 logging.basicConfig(level=logging.WARNING, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger('ChromaShift')
@@ -32,6 +32,8 @@ def resource_path(*parts: str) -> str:
 
 
 MODES = ('RED', 'BLUE', 'GREEN')
+# Четвёртый цвет открывается в дереве (ветка «Цвет»). Базовые враги и щиты используют только MODES.
+ALL_MODES = ('RED', 'BLUE', 'GREEN', 'VIOLET')
 
 
 class GameConfig:
@@ -97,23 +99,38 @@ class GameConfig:
             'KAMIKAZE_SPEED': 290.0, 'KAMIKAZE_HP': 30, 'KAMIKAZE_RADIUS': 12,
             'KAMIKAZE_EXPLOSION_RADIUS': 65, 'KAMIKAZE_EXPLOSION_DAMAGE': 30,
             'KAMIKAZE_WARN_TIME': 1.0, 'KAMIKAZE_WARN_RADIUS': 80.0,
-            'DISSONANCE_HP': 250, 'DISSONANCE_RADIUS': 15, 'DISSONANCE_SPEED': 120.0,
+            # 0.7.0: Диссонанс больше не «губка» — 90 HP и цветная броня вместо 250 HP
+            'DISSONANCE_HP': 90, 'DISSONANCE_RADIUS': 15, 'DISSONANCE_SPEED': 125.0,
             'DISSONANCE_NORMAL_DAMAGE_MULT': 0.2, 'DISSONANCE_HOMING_STRENGTH': 0.3,
+            'DISSONANCE_ARMOR_MULT': 0.15, 'DISSONANCE_COLOR_TIME': 3.5, 'DISSONANCE_JAM_RADIUS': 130.0,
+            'DISSONANCE_JAM_INTERVAL': 5.0, 'DISSONANCE_JAM_TIME': 1.6, 'DISSONANCE_DAMAGE': 16,
+            'VIOLET_ACCEL': 1100.0, 'VIOLET_DECEL': 1.4, 'VIOLET_MAX_SPEED': 460.0, 'VIOLET_RECOIL': 0.02,
             'BOSS_HP': 1600, 'BOSS_RADIUS': 34, 'BOSS_SPEED': 70.0,
             'BOSS_OFF_COLOR_DAMAGE_MULT': 0.4,
 
             # === Волны (бюджетная система) ===
-            'WAVE_BUDGET_BASE': 5.0, 'WAVE_BUDGET_GROWTH': 2.2, 'WAVE_BUDGET_EXPONENT': 1.25,
+            # 0.7.0: врагов заметно больше (бюджет +40%, лимит на экране 30 → 60, дешёвые рои)
+            'WAVE_BUDGET_BASE': 7.0, 'WAVE_BUDGET_GROWTH': 3.1, 'WAVE_BUDGET_EXPONENT': 1.25,
             'WAVE_COST_CHASER': 1.0, 'WAVE_COST_KAMIKAZE': 1.2, 'WAVE_COST_SHOOTER': 2.0,
-            'WAVE_COST_DISSONANCE': 4.0, 'WAVE_COST_ELITE_EXTRA': 2.0,
-            'WAVE_MAX_ACTIVE_ENEMIES': 30, 'WAVE_MAX_SHOOTERS': 6, 'WAVE_MAX_KAMIKAZE': 6,
-            'WAVE_MAX_ENEMY_BULLETS': 60,
+            'WAVE_COST_DISSONANCE': 3.0, 'WAVE_COST_ELITE_EXTRA': 2.0,
+            'WAVE_COST_SWARM': 0.3, 'WAVE_COST_PRISM': 2.5, 'WAVE_COST_MIRROR': 2.5, 'WAVE_COST_CHAMELEON': 2.0,
+            'WAVE_COST_SHIELDBEARER': 3.0, 'WAVE_COST_MINER': 2.2, 'WAVE_COST_LASER': 3.0,
+            'WAVE_COST_DEVOURER': 3.0, 'WAVE_COST_SUMMONER': 3.5, 'WAVE_COST_TELEPORTER': 2.0,
+            'WAVE_COST_RESONATOR': 2.5, 'WAVE_COST_LEADER': 3.0,
+            'WAVE_MAX_ACTIVE_ENEMIES': 60, 'WAVE_MAX_SHOOTERS': 8, 'WAVE_MAX_KAMIKAZE': 8,
+            'WAVE_MAX_ENEMY_BULLETS': 90, 'WAVE_REINFORCE_AFTER': 12.0,
+            'HORDE_BUDGET_MULT': 2.0, 'HORDE_INTERMISSION_MULT': 0.4,
+            'MINIBOSS_HP': 650, 'BLITZ_DURATION': 600.0, 'SURVIVE_DURATION': 45.0,
+            'GAMBLE_BUDGET_MULT': 1.4, 'GAMBLE_SCORE_MULT': 1.6, 'GAMBLE_CP': 2,
+            'CRIT_CHANCE': 0.06, 'CRIT_MULT': 2.0, 'SHARDS_PER_KILL': 1, 'SHOP_WAVE_INTERVAL': 3,
+            'OVERLOAD_MAX': 12, 'PAINT_CHANCE': 0.12, 'MIX_WINDOW': 0.35, 'MIX_COOLDOWN': 2.5,
+            'PARRY_SWITCH_WINDOW': 0.18, 'COLOR_SKILL_COOLDOWN': 7.0, 'REPLAY_SECONDS': 10.0,
             'WAVE_SUBWAVE_RELEASE_FRACTION': 0.3, 'WAVE_SUBWAVE_MAX_GAP': 8.0,
             'WAVE_SPAWN_STAGGER': 0.12, 'WAVE_TELEGRAPH_TIME': 0.7,
             'WAVE_SAFE_RADIUS': 250.0, 'WAVE_FAR_EDGE_BIAS': 0.7,
             'WAVE_INTERMISSION': 2.5, 'BREATHER_WAVE_INTERVAL': 5, 'BREATHER_BUDGET_MULT': 0.5,
             'BOSS_WAVE_INTERVAL': 10, 'ARTIFACT_WAVE_INTERVAL': 5,
-            'SPECIAL_WAVE_CHANCE': 0.15, 'SPECIAL_WAVE_MIN': 7,
+            'SPECIAL_WAVE_CHANCE': 0.22, 'SPECIAL_WAVE_MIN': 7,
             'ELITE_CHANCE_PER_WAVE': 0.03, 'ELITE_START_WAVE': 4, 'ELITE_MAX_CHANCE': 0.35,
             'ENEMY_HP_SCALE': 0.04, 'ENEMY_HP_SCALE_MAX': 2.2,
             'ENEMY_SPEED_SCALE': 0.015, 'ENEMY_SPEED_SCALE_MAX': 1.35,

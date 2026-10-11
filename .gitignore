@@ -10,3 +10,6 @@ chromashift/build/
 chromashift/dist/
 *.spec
 *.bak[0-9]
+chromashift/venv/
+venv/
+chromashift/crash_*.txt
